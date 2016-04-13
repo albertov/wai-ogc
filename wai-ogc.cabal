@@ -1,0 +1,45 @@
+name:                wai-ogc
+version:             0.1.0.0
+synopsis:            Opengeospatial types and request parsing
+description:         Please see README.md
+homepage:            https://github.com/albertov/wai-ogc
+license:             BSD3
+license-file:        LICENSE
+author:              Alberto Valverde González
+maintainer:          alberto@toscat.net
+copyright:           2016 Alberto Valverde González - Meteogrid
+category:            Web
+build-type:          Simple
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Network.Wai.Ogc
+  build-depends:       base >=4.8 && <5
+                     , wai
+  default-language:    Haskell2010
+  ghc-options:         -Wall
+                       -Werror
+                       -fwarn-incomplete-patterns
+                       -fwarn-incomplete-uni-patterns
+
+test-suite spec
+  type:                exitcode-stdio-1.0
+  build-depends:       base
+                     , hspec
+                     , hspec-core >= 1.13
+                     , hspec-wai
+                     , wai-ogc
+  hs-source-dirs:      spec
+  main-is:             Spec.hs
+  other-modules:       Network.Wai.OgcSpec
+  default-language:    Haskell2010
+  ghc-options:         -Wall
+                       -Werror
+                       -fwarn-incomplete-patterns
+                       -fwarn-incomplete-uni-patterns
+
+
+source-repository head
+  type:     git
+  location: https://github.com/albertov/wai-ogc
