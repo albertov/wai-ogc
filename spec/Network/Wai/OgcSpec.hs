@@ -3,10 +3,12 @@ module Network.Wai.OgcSpec (main, spec) where
 
 import           Network.Wai.Ogc
 
+import           Data.ByteString.Char8 (unpack)
 import           Data.Monoid ((<>))
 import           Data.String (IsString, fromString)
 import           Network.Wai (Application, responseLBS)
 import           Network.HTTP.Types (status200, status400)
+import           Network.HTTP.Types.URI (renderSimpleQuery)
 import           Test.Hspec
 import           Test.Hspec.Wai
 
@@ -30,6 +32,7 @@ spec = with (return app) $ do
   commonSpec
   wmsSpec
 
+
 commonSpec :: SpecWith Application
 commonSpec = describe "common" $ do
   "/" `getFailsWith` MissingParameterError "SERVICE"
@@ -39,7 +42,7 @@ commonSpec = describe "common" $ do
   "/?SeRViCe=foo" `getFailsWith` InvalidParameterError "SERVICE" "foo"
 
 wmsUrl :: (IsString a, Monoid a) => a -> a
-wmsUrl = ("/?SERVICE=WMS&" <>)
+wmsUrl = ("?SERVICE=WMS&" <>)
 
 wmsSpec :: SpecWith Application
 wmsSpec = describe "WMS" $ do
@@ -50,9 +53,9 @@ wmsSpec = describe "WMS" $ do
 
 wmsCapabilitiesSpec :: SpecWith Application
 wmsCapabilitiesSpec = describe "GetCapabilities" $ do
-  describe "with no optional parameters" $ do
-    wmsUrl "REQUEST=GetCapabilities"
-      `getSucceedsWith` wmsCapabilitiesRequest
+
+  renderParseSpec "with no optional parameters" wmsCapabilitiesRequest
+
   describe "legacy 1.0.0 request without explicit version" $ do
     wmsUrl "REQUEST=capabilities"
       `getSucceedsWith` wmsCapabilitiesRequest
@@ -109,11 +112,7 @@ wmsMapSpec = describe "GetMap" $ do
       epsg23030 = maybe (error "should not happen") id (epsgCrs 23030)
       pngFormat = Type (Image "png") []
       mapReq    = wmsMapRequest
-        Wms130 [("foo","foo")] epsg23030 (Bbox 0 0 1 1) 1 2 pngFormat
-      getMap130Min
-        = getMap130
-        . ("LAYERS=foo&STYLES=foo&CRS=EPSG:23030&BBOX=0,0,1,1\
-           \&WIDTH=1&HEIGHT=2&FORMAT=image/png&" <>)
+        Wms130 [Layer "foo" "foo"] epsg23030 (Bbox 0 0 1 1) (Size 1 2) pngFormat
 
   describe "with missing mandatory parameters" $ do
     wmsUrl "REQUEST=GetMap" `getFailsWith` MissingParameterError "VERSION"
@@ -133,14 +132,30 @@ wmsMapSpec = describe "GetMap" $ do
       "LAYERS=foo&STYLES=foo&CRS=EPSG:23030&BBOX=0,0,1,1&WIDTH=1&HEIGHT=1"
       `getFailsWith` MissingParameterError "FORMAT"
 
-  describe "with no optional parameters" $ do
-    getMap130Min "" `getSucceedsWith` mapReq
+  renderParseSpec "with no optional parameters" mapReq
+
+  renderParseSpec "with unicode layer names"
+    mapReq { wmsMapLayers = [Layer "Avión" ""] }
+
+  renderParseSpec "with two layers with default styles"
+    mapReq { wmsMapLayers = [Layer "Avión" "", Layer "Camión" ""] }
 
   describe "with layers and styles length mismatch" $ do
     getMap130 "LAYERS=foo,bar&STYLES=foo"
       `getFailsWith` LayersStylesLengthMismatchError
 
 
+--
+-- * Utils
+--
+
+renderRequestQS :: OgcRequest -> String
+renderRequestQS = unpack . renderSimpleQuery True . fst . renderRequest
+
+
+renderParseSpec :: String -> OgcRequest -> SpecWith Application
+renderParseSpec name req =
+  describe name (renderRequestQS req `getSucceedsWith` req)
 
 getFailsWith :: String -> OgcRequestError -> SpecWith Application
 getFailsWith url err =

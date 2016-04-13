@@ -24,6 +24,7 @@ library
                      , time
                      , attoparsec
                      , scientific
+                     , http-types
                      , wai
   default-language:    Haskell2010
   ghc-options:         -Wall
@@ -35,6 +36,7 @@ library
 test-suite spec
   type:                exitcode-stdio-1.0
   build-depends:       base
+                     , bytestring
                      , hspec
                      , hspec-core >= 1.13
                      , hspec-wai
