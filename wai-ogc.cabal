@@ -18,14 +18,19 @@ library
   build-depends:       base >=4.8 && <5
                      , bytestring
                      , case-insensitive
+                     , spatial-reference
                      , mime
                      , text
+                     , time
+                     , attoparsec
+                     , scientific
                      , wai
   default-language:    Haskell2010
   ghc-options:         -Wall
                        -Werror
                        -fwarn-incomplete-patterns
                        -fwarn-incomplete-uni-patterns
+                       -funbox-strict-fields
 
 test-suite spec
   type:                exitcode-stdio-1.0
