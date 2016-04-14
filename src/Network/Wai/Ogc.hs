@@ -21,7 +21,7 @@ module Network.Wai.Ogc (
   , Transparent      (..)
   , Time             (..)
   , TimeInterval     (..)
-  , TimeResolution   (..)
+  , Elevation        (..)
   , Dimension        (..)
   , UpdateSequence
 
@@ -36,7 +36,10 @@ module Network.Wai.Ogc (
   , MIME.MIMEType (..)
   , MIME.MIMEParam (..)
   , module SR
+  , module Duration
 ) where
+
+import           Network.Wai.Ogc.Internal.Duration as Duration
 
 import           Control.Applicative ((<|>))
 import           Control.Arrow (first)
@@ -55,12 +58,14 @@ import qualified Data.CaseInsensitive as CI
 import qualified Data.List as L
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
-import           Data.Scientific (Scientific, floatingOrInteger)
+import           Data.Scientific (Scientific)
 import           Data.String (IsString, fromString)
 import           Data.Text (Text)
-import           Data.Text.Encoding (decodeUtf8With, encodeUtf8)
-import           Data.Text.Encoding.Error (lenientDecode)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+import qualified Data.Text.Encoding.Error as T
 import           Data.Time (UTCTime)
+import           Data.Time.ISO8601 (formatISO8601, parseISO8601)
 import           Data.Typeable (Typeable)
 import           Data.Word (Word8, Word32)
 import           SpatialReference as SR
@@ -79,11 +84,12 @@ data Layer =
 
 instance FromQuery [Layer] () where
   fromQuery () query = do
-    layers <- mandatoryParameter "LAYERS" parser query
+    layers <- case mandatoryParameter "LAYERS" parser query of
+          Left (EmptyParameterError _) -> Right [""]
+          ls                           -> ls
     styles <- case (layers, mandatoryParameter "STYLES" parser query) of
-          -- STYLES is a special parameter ..
-          ([_], Left (EmptyParameterError "STYLES")) -> Right [""]
-          (_ , ss)                                   -> ss
+          ([_], Left (EmptyParameterError _)) -> Right [""]
+          (_ , ss)                            -> ss
 
     if length layers == length styles
       then Right (zipWith Layer layers styles)
@@ -91,12 +97,14 @@ instance FromQuery [Layer] () where
     where
       parser = (lenientDecodeUtf8 <$> AP.takeWhile (/=','))
                 `sepBy1` (char ',')
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems [Layer] c where
   toQueryItems _ ls =
-    [ ("LAYERS", BS.intercalate "," (map (encodeUtf8 . layerName) ls))
-    , ("STYLES", BS.intercalate "," (map (encodeUtf8 . layerStyle) ls))
+    [ ("LAYERS", BS.intercalate "," (map (T.encodeUtf8 . layerName) ls))
+    , ("STYLES", BS.intercalate "," (map (T.encodeUtf8 . layerStyle) ls))
     ]
+  {-# INLINE toQueryItems #-}
 
 data Bbox =
   Bbox {
@@ -112,10 +120,12 @@ instance FromQuery Bbox () where
                         <*> (scientific <* char ',')
                         <*> (scientific <* char ',')
                         <*> scientific
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems Bbox c where
   toQueryItems _ (Bbox a b c d) = [ ("BBOX", runBuilder bld)]
     where bld = mconcat (L.intersperse "," (map showScientific [a, b, c, d]))
+  {-# INLINE toQueryItems #-}
 
 --
 -- * BgColor
@@ -131,16 +141,18 @@ data BgColor =
 instance FromQuery (Maybe BgColor) () where
   fromQuery () = optionalParameter "BGCOLOR" $ do
     hexVal :: Word32 <- "0x" *> hexadecimal
-    let r = fromIntegral ((hexVal `unsafeShiftR` 24) .&. 0xFF)
-        g = fromIntegral ((hexVal `unsafeShiftR` 16) .&. 0xFF)
+    let r = fromIntegral ((hexVal `unsafeShiftR` 16) .&. 0xFF)
+        g = fromIntegral ((hexVal `unsafeShiftR` 8) .&. 0xFF)
         b = fromIntegral (hexVal .&. 0xFF)
     if hexVal <= 0xFFFFFF
        then return (BgColor r g b) else fail "Invalid RGB color"
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems BgColor c where
   toQueryItems _ (BgColor r g b) = [("BGCOLOR", runBuilder hexColor)]
     where
       hexColor = "0x" <> word8HexFixed r <> word8HexFixed g <> word8HexFixed b
+  {-# INLINE toQueryItems #-}
 --
 -- * Transparent
 --
@@ -153,10 +165,12 @@ instance FromQuery (Maybe Transparent) () where
     optionalParameter "TRANSPARENT" $ choice
       [ stringCI "TRUE"  *> pure Transparent
       , stringCI "FALSE" *> pure Opaque]
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems Transparent c where
   toQueryItems _ Transparent = [("TRANSPARENT", "TRUE")]
   toQueryItems _ Opaque      = [("TRANSPARENT", "FALSE")]
+  {-# INLINE toQueryItems #-}
 
 data Size =
   Size {
@@ -168,10 +182,12 @@ instance FromQuery Size () where
   fromQuery () query =
     Size <$> mandatoryParameter "WIDTH" posInt query
          <*> mandatoryParameter "HEIGHT" posInt query
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems Size c where
   toQueryItems _ (Size w h) =
     [("WIDTH", fromString (show w)) , ("HEIGHT", fromString (show h))]
+  {-# INLINE toQueryItems #-}
 
 
 data OgcRequest
@@ -208,9 +224,11 @@ newtype Elevation = Elevation Scientific
 
 instance FromQuery (Maybe Elevation) () where
   fromQuery () = optionalParameter "ELEVATION" (Elevation <$> scientific)
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems Elevation c where
   toQueryItems _ (Elevation e) = [("ELEVATION", showScientific e)]
+  {-# INLINE toQueryItems #-}
 
 --
 -- * TimeInterval
@@ -223,24 +241,35 @@ data TimeInterval =
   TimeInterval {
     tiStart      :: Time
   , tiEnd        :: Time
-  , tiResolution :: Maybe TimeResolution
+  , tiResolution :: Maybe Duration
   } deriving (Eq, Show)
 
-data TimeResolution =
-  TimeResolution {
-    resYears   :: Maybe Int
-  , resMonths  :: Maybe Int
-  , resDays    :: Maybe Int
-  , resHours   :: Maybe Int
-  , resMinutes :: Maybe Int
-  , resSeconds :: Maybe Int
-  } deriving (Eq, Show)
+formatTime' :: IsString s => Time -> s
+formatTime' Current  = "current"
+formatTime' (Time t) = fromString (formatISO8601 t)
 
 instance FromQuery (Maybe (Either Time TimeInterval)) () where
-  fromQuery () = const (return Nothing) -- TODO
+  fromQuery () = optionalParameter "TIME"
+    ((Right <$> parseInterval) <|> (Left  <$> parseTime))
+    where
+      parseInterval =
+        TimeInterval
+          <$> (parseTime <* char '/')
+          <*> parseTime
+          <*> ((endOfInput *> pure Nothing) <|> (Just <$> (char '/' *> duration)))
+      parseTime = (stringCI "current" *> pure Current) <|> parseIso
+      parseIso = maybe (fail "invalid time") (return . Time)
+             =<< (parseISO8601 . BS.unpack <$> takeWhile1 (/='/'))
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems (Either Time TimeInterval) c where
-  toQueryItems _ = const [] -- TODO
+  toQueryItems _ (Left t)  = [("TIME", formatTime' t)]
+  toQueryItems _ (Right (TimeInterval s e Nothing)) =
+    [("TIME", runBuilder (formatTime' s <> "/" <> formatTime' e))]
+  toQueryItems _ (Right (TimeInterval s e (Just d))) = [("TIME", runBuilder b)]
+    where b = formatTime' s <> "/" <> formatTime' e <> "/" <> formatDurationB d
+  {-# INLINE toQueryItems #-}
+
 
 --
 -- * Dimension
@@ -249,16 +278,25 @@ instance ToQueryItems (Either Time TimeInterval) c where
 
 data Dimension =
   Dimension {
-    dimName  :: ByteString -- ^ without the "DIM_" prefix
+    dimName  :: Text       -- ^ without the "DIM_" prefix, all-caps
   , dimValue :: ByteString -- ^ unparsed since it is application dependant
   } deriving (Eq, Show)
 
 
 instance FromQuery [Dimension] () where
-  fromQuery () = const (return []) -- TODO
+  fromQuery () = Right . foldr step []
+    where
+      step (splitted -> ("DIM_", k), Just v) z = (Dimension k v):z
+      step _                                 z = z
+      splitted = T.splitAt 4 . T.toUpper . lenientDecodeUtf8 . CI.original
+  {-# INLINE fromQuery #-}
+
+
 
 instance ToQueryItems [Dimension] c where
-  toQueryItems _ = const [] -- TODO
+  toQueryItems _ =
+    map (\(Dimension (T.encodeUtf8 . T.toUpper -> k) v) -> ("DIM_"<>k, v))
+  {-# INLINE toQueryItems #-}
 
 
 wmsCapabilitiesRequest :: OgcRequest
@@ -301,12 +339,14 @@ instance FromQuery (Maybe WmsVersion) WmsVersion where
     where parser = "1.1.1" *> pure Wms111
   fromQuery Wms130 = optionalParameter "VERSION"  parser
     where parser = ("1.3.0" <|> "1.3") *> pure Wms130
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems WmsVersion WmsVersion where
   toQueryItems Wms100 Wms100 = [("WMSTVER", "1.0.0")]
   toQueryItems Wms111 Wms111 = [("VERSION", "1.1.1")]
   toQueryItems Wms130 Wms130 = [("VERSION", "1.3.0")]
   toQueryItems _      _      = error "ToQueryItems: WmsVersion"
+  {-# INLINE toQueryItems #-}
 
 data OgcRequestError
   = MissingParameterError           ByteString
@@ -334,30 +374,34 @@ instance FromQuery (Maybe WmsMapExceptions) WmsVersion where
                             , stringCI "BLANK"   *> pure WmsMapExcBlank
                             ]
       mimeParser = stringCI "application/vnd.ogc_se" *> simpleParser
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems WmsMapExceptions WmsVersion where
   toQueryItems Wms111 exc = [("EXCEPTIONS", val)]
     where
       val = case exc of
-              WmsMapExcXml     -> "application.vnd.ogc_sexml"
-              WmsMapExcInImage -> "application.vnd.ogc_seinimage"
-              WmsMapExcBlank   -> "application.vnd.ogc_seblank"
+              WmsMapExcXml     -> "application/vnd.ogc_sexml"
+              WmsMapExcInImage -> "application/vnd.ogc_seinimage"
+              WmsMapExcBlank   -> "application/vnd.ogc_seblank"
   toQueryItems _ exc = [("EXCEPTIONS", val)]
     where
       val = case exc of
               WmsMapExcXml     -> "XML"
               WmsMapExcInImage -> "INIMAGE"
               WmsMapExcBlank   -> "BLANK"
+  {-# INLINE toQueryItems #-}
 
 newtype UpdateSequence = UpdateSequence ByteString
   deriving (Eq, Ord, Show, IsString)
 
 instance FromQuery (Maybe UpdateSequence) () where
   fromQuery () = optionalParameter
-    "UPDATESEQUENCE" (UpdateSequence <$> takeWhile1 (const True))
+    "UPDATESEQUENCE" (UpdateSequence <$> takeByteString)
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems UpdateSequence a where
   toQueryItems _ (UpdateSequence s)  = [("UPDATESEQUENCE", s)]
+  {-# INLINE toQueryItems #-}
 
 parseRequest :: Request -> Either OgcRequestError OgcRequest
 parseRequest req = do
@@ -419,6 +463,7 @@ class ToQueryItems a c  where
 
 instance {-# OVERLAPPABLE #-} ToQueryItems a c => ToQueryItems (Maybe a) c where
   toQueryItems c = maybe [] (toQueryItems c)
+  {-# INLINE toQueryItems #-}
 
 data WmsRequest
   = GetCapabilities
@@ -443,12 +488,14 @@ instance FromQuery WmsRequest (Maybe WmsVersion) where
         , stringCI "GetMap"          *> pure GetMap
         , stringCI "GetFeatureInfo"  *> pure GetFeatureInfo
         ]
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems WmsRequest WmsVersion where
   toQueryItems Wms100 GetCapabilities = [("REQUEST", "capabilities")]
   toQueryItems Wms100 GetMap          = [("REQUEST", "map")]
   toQueryItems Wms100 GetFeatureInfo  = [("REQUEST", "feature_info")]
   toQueryItems _      req             = [("REQUEST", fromString (show req))]
+  {-# INLINE toQueryItems #-}
 
 type QueryCI = [(CI ByteString, Maybe ByteString)]
 
@@ -463,9 +510,11 @@ instance FromQuery Service () where
     , stringCI "WMS" *> pure WMS
     , stringCI "WPS" *> pure WPS
     ]
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems Service c where
   toQueryItems _ s = [("SERVICE", fromString (show s))]
+  {-# INLINE toQueryItems #-}
 
 
 parseWmsRequest :: Request -> Either OgcRequestError OgcRequest
@@ -475,7 +524,7 @@ parseWmsRequest req = do
   case request of
     GetCapabilities -> parseWmsCapabilitiesRequest version
     GetMap          -> parseWmsMapRequest version
-    GetFeatureInfo  -> undefined
+    GetFeatureInfo  -> Left NotImplementedError
   where
     query = queryStringCI req
 
@@ -510,23 +559,25 @@ parseWmsRequest req = do
 instance FromQuery SR.Crs WmsVersion where
   fromQuery Wms130 = reqCrs "CRS"
   fromQuery _      = reqCrs "SRS"
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems SR.Crs WmsVersion where
   toQueryItems Wms130 (Coded code val) =
     [("CRS", runBuilder (fromString code) <> ":" <> show' val)]
   toQueryItems _ (Coded code val) =
-    [("STS", runBuilder (fromString code) <> ":" <> show' val)]
+    [("SRS", runBuilder (fromString code) <> ":" <> show' val)]
   toQueryItems Wms130 (Named name) = [("CRS", fromString name)]
-  toQueryItems _ (Named name) = [("SRS", fromString name)]
-  toQueryItems _ _            = error "toQueryItems: Crs"
+  toQueryItems _      (Named name) = [("SRS", fromString name)]
+  toQueryItems _      _            = error "toQueryItems: Crs"
+  {-# INLINE toQueryItems #-}
 
 reqCrs :: CI ByteString -> QueryCI -> Either OgcRequestError SR.Crs
-reqCrs key = mandatoryParameter key (epsg <|> crs)
+reqCrs key = mandatoryParameter key (epsg <|> named)
   where
-    epsg, crs :: Parser SR.Crs
-    crs  = undefined
+    epsg, named :: Parser SR.Crs
+    named  = namedCrs <$> (BS.unpack <$> takeByteString)
     epsg = maybe (fail "invalid epsg") return
-       =<< (SR.epsgCrs <$> (stringCI "EPSG:" *> decimal))
+       =<< (SR.epsgCrs <$> (stringCI "EPSG:" *> decimal <* endOfInput))
 
 
 
@@ -540,14 +591,17 @@ instance FromQuery (Maybe MIME.Type) () where
       Nothing       -> Right Nothing
     where
       parseMIME = MIME.parseMIMEType . lenientDecodeUtf8
+  {-# INLINE fromQuery #-}
 
 instance FromQuery MIME.Type () where
   fromQuery ()
     = either Left (maybe (Left (MissingParameterError "FORMAT")) Right)
     . fromQuery ()
+  {-# INLINE fromQuery #-}
 
 instance ToQueryItems MIME.Type c where
-  toQueryItems _ a = [("FORMAT", encodeUtf8 (MIME.showType a))]
+  toQueryItems _ a = [("FORMAT", T.encodeUtf8 (MIME.showType a))]
+  {-# INLINE toQueryItems #-}
 
 --
 -- * Utils
@@ -559,7 +613,7 @@ posInt = do
   if n==0 then fail "Negative number" else return n
 
 lenientDecodeUtf8 :: ByteString -> Text
-lenientDecodeUtf8 = decodeUtf8With lenientDecode
+lenientDecodeUtf8 = T.decodeUtf8With T.lenientDecode
 
 mandatoryParameter
   :: CI ByteString
@@ -591,8 +645,7 @@ queryStringCI :: Request -> QueryCI
 queryStringCI = map (first CI.mk) . queryString
 
 showScientific :: IsString a => Scientific -> a
-showScientific (floatingOrInteger -> val :: Either Double Int) =
-  either show' show' val
+showScientific = show'
 
 runBuilder :: Builder -> ByteString
 runBuilder = LBS.toStrict . toLazyByteString

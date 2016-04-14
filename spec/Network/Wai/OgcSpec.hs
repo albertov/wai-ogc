@@ -1,16 +1,24 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Network.Wai.OgcSpec (main, spec) where
 
+import           Network.Wai.Ogc.Internal.DurationSpec ()
 import           Network.Wai.Ogc
 
-import           Data.ByteString.Char8 (unpack)
+import           Data.ByteString.Char8 (ByteString)
+import qualified Data.ByteString.Char8 as BS
+import qualified Data.Text as T
 import           Data.Monoid ((<>))
 import           Data.String (IsString, fromString)
 import           Network.Wai (Application, responseLBS)
 import           Network.HTTP.Types (status200, status400)
 import           Network.HTTP.Types.URI (renderSimpleQuery)
+import           Test.QuickCheck (getPositive, getNonNegative)
+import           Test.QuickCheck.Instances ()
 import           Test.Hspec
 import           Test.Hspec.Wai
+import           Test.Hspec.Wai.QuickCheck
 
 main :: IO ()
 main = hspec spec
@@ -31,6 +39,12 @@ spec :: Spec
 spec = with (return app) $ do
   commonSpec
   wmsSpec
+
+  it "can parse a rendered arbitrary GET OgcRequest" $
+    property  $ \(GetReq req) ->
+      let body = fromString (show req)
+          url  = renderRequestQS' req
+      in get url `shouldRespondWith` body {matchStatus=200}
 
 
 commonSpec :: SpecWith Application
@@ -150,8 +164,10 @@ wmsMapSpec = describe "GetMap" $ do
 --
 
 renderRequestQS :: OgcRequest -> String
-renderRequestQS = unpack . renderSimpleQuery True . fst . renderRequest
+renderRequestQS = BS.unpack . renderRequestQS'
 
+renderRequestQS' :: OgcRequest -> ByteString
+renderRequestQS' = renderSimpleQuery True . fst . renderRequest
 
 renderParseSpec :: String -> OgcRequest -> SpecWith Application
 renderParseSpec name req =
@@ -170,3 +186,100 @@ getSucceedsWith url req =
     it ("succeeds with " ++ show req) $
       let body = fromString (show req)
       in get (fromString url) `shouldRespondWith` body {matchStatus = 200}
+
+newtype GetReq = GetReq OgcRequest
+  deriving (Eq, Show)
+
+instance Arbitrary GetReq where
+  arbitrary = GetReq <$> oneof [wmsCap, wmsMap]
+    where
+      wmsCap = WmsCapabilitiesRequest <$> arbitrary
+                                      <*> arbitrary
+                                      <*> arbitrary
+      wmsMap = WmsMapRequest <$> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+                             <*> arbitrary
+instance Arbitrary Type where
+  arbitrary = Type <$> arbitrary <*> pure []
+    -- FIXME: parseMIMEType does funky things with encoding
+
+instance Arbitrary MIMEParam where
+  arbitrary = MIMEParam <$> arbitrary <*> arbitrary
+
+instance Arbitrary MIMEType where
+  arbitrary = elements [
+      Image "png"
+    , Image "jpeg"
+    , Image "gif"
+    , Text "xml"
+    , Video "mpeg"
+    -- FIXME: parseMIMEType does funky things with encoding
+    ]
+
+instance Arbitrary [Layer] where
+  arbitrary = listOf1 arbitrary
+
+instance Arbitrary Layer where
+  arbitrary = do
+    name  <- arbitrary
+    style <- arbitrary
+    if ',' `elem` name || ',' `elem` style
+       then arbitrary
+       else return (Layer (fromString name) (fromString style))
+
+instance Arbitrary Dimension where
+  arbitrary = Dimension <$> (T.toUpper <$> arbitrary)
+                        <*> (fromString <$> listOf1 arbitrary)
+
+
+instance Arbitrary Elevation where
+  arbitrary = Elevation <$> arbitrary
+
+instance Arbitrary TimeInterval where
+  arbitrary = TimeInterval <$> arbitrary <*> arbitrary <*> arbitrary
+
+instance Arbitrary Time where
+  arbitrary = oneof [pure Current, Time <$> arbitrary]
+
+instance Arbitrary UpdateSequence where
+  arbitrary = fromString <$> listOf1 arbitrary
+
+instance Arbitrary WmsMapExceptions where
+  arbitrary = elements [minBound..maxBound]
+
+instance Arbitrary Transparent where
+  arbitrary = elements [minBound..maxBound]
+
+instance Arbitrary WmsVersion where
+  arbitrary = elements [minBound..maxBound]
+
+instance Arbitrary BgColor where
+  arbitrary = BgColor <$> arbitrary <*> arbitrary <*> arbitrary
+
+instance Arbitrary Size where
+  arbitrary = Size <$> (getPositive <$> arbitrary)
+                   <*> (getPositive <$> arbitrary)
+
+instance Arbitrary Bbox where
+  arbitrary = do
+    x0 <- arbitrary
+    y0 <- arbitrary
+    w <- getPositive <$> arbitrary
+    h <- getPositive <$> arbitrary
+    return (Bbox x0 y0 (x0 + w) (y0 + h))
+
+instance Arbitrary Crs where
+  arbitrary = oneof [named, epsg]
+    where
+      named = namedCrs <$> listOf1 arbitrary
+      epsg = maybe epsg return
+          =<< (epsgCrs <$> (getNonNegative <$> arbitrary))
