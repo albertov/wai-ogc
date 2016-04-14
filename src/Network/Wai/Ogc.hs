@@ -43,6 +43,7 @@ import           Network.Wai.Ogc.Internal.Duration as Duration
 
 import           Control.Applicative ((<|>))
 import           Control.Arrow (first)
+import           Control.Monad (liftM)
 import qualified Codec.MIME.Parse as MIME
 import qualified Codec.MIME.Type as MIME
 import           Data.Attoparsec.ByteString.Char8 as AP
@@ -64,8 +65,8 @@ import           Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as T
-import           Data.Time (UTCTime)
-import           Data.Time.ISO8601 (formatISO8601, parseISO8601)
+import           Data.Time (UTCTime, defaultTimeLocale)
+import           Data.Time.Format (formatTime, parseTimeM)
 import           Data.Typeable (Typeable)
 import           Data.Word (Word8, Word32)
 import           SpatialReference as SR
@@ -246,7 +247,7 @@ data TimeInterval =
 
 formatTime' :: IsString s => Time -> s
 formatTime' Current  = "current"
-formatTime' (Time t) = fromString (formatISO8601 t)
+formatTime' (Time t) = fromString (formatTime defaultTimeLocale "%FT%T%QZ" t)
 
 instance FromQuery (Maybe (Either Time TimeInterval)) () where
   fromQuery () = optionalParameter "TIME"
@@ -257,9 +258,11 @@ instance FromQuery (Maybe (Either Time TimeInterval)) () where
           <$> (parseTime <* char '/')
           <*> parseTime
           <*> ((endOfInput *> pure Nothing) <|> (Just <$> (char '/' *> duration)))
-      parseTime = (stringCI "current" *> pure Current) <|> parseIso
-      parseIso = maybe (fail "invalid time") (return . Time)
-             =<< (parseISO8601 . BS.unpack <$> takeWhile1 (/='/'))
+      parseTime = (stringCI "current" *> pure Current)
+              <|> parseFmt "%FT%T%QZ"
+              <|> parseFmt "%F"
+      parseFmt fmt = liftM Time . parseTimeM False defaultTimeLocale fmt
+                 =<< (BS.unpack <$> takeWhile1 (/='/'))
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems (Either Time TimeInterval) c where

@@ -9,6 +9,8 @@ import           Network.Wai.Ogc
 import           Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
+import           Data.Time (UTCTime(..))
+import           Data.Time.Calendar (fromGregorian)
 import           Data.Monoid ((<>))
 import           Data.String (IsString, fromString)
 import           Network.Wai (Application, responseLBS)
@@ -153,6 +155,17 @@ wmsMapSpec = describe "GetMap" $ do
 
   renderParseSpec "with two layers with default styles"
     mapReq { wmsMapLayers = [Layer "Avión" "", Layer "Camión" ""] }
+
+  describe "with TIME" $ do
+    getMap130
+      (renderRequestQS mapReq <> "&TIME=2000-07-01/2000-07-31/P1D")
+      `getSucceedsWith` mapReq {
+          wmsMapTime = Just $ Right $
+            TimeInterval
+              (Time (UTCTime (fromGregorian 2000 7 1) 0))
+              (Time (UTCTime (fromGregorian 2000 7 31) 0))
+              (Just (DurationDate (DurDateDay (DurDay 1) Nothing)))
+          }
 
   describe "with layers and styles length mismatch" $ do
     getMap130 "LAYERS=foo,bar&STYLES=foo"

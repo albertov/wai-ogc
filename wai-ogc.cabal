@@ -23,7 +23,6 @@ library
                      , mime
                      , text
                      , time
-                     , iso8601-time
                      , attoparsec
                      , scientific
                      , http-types
@@ -49,6 +48,7 @@ test-suite spec
                      , QuickCheck
                      , quickcheck-instances
                      , text
+                     , time
   hs-source-dirs:      spec
   main-is:             Spec.hs
   other-modules:       Network.Wai.OgcSpec
