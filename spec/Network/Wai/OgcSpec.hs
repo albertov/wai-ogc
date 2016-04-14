@@ -166,10 +166,10 @@ wmsMapSpec = describe "GetMap" $ do
     getMap130
       (renderRequestQS mapReq <> "&TIME=2000-07-01/2000-07-31/P1D")
       `getSucceedsWith` mapReq {
-          wmsMapTime = Just $ Right $
-            TimeInterval
-              (Time (UTCTime (fromGregorian 2000 7 1) 0))
-              (Time (UTCTime (fromGregorian 2000 7 31) 0))
+          wmsMapTime = Just $
+            Interval
+              (TimeStamp (UTCTime (fromGregorian 2000 7 1) 0))
+              (TimeStamp (UTCTime (fromGregorian 2000 7 31) 0))
               (Just (DurationDate (DurDateDay (DurDay 1) Nothing)))
           }
 
@@ -276,11 +276,13 @@ instance Arbitrary Dimension where
 instance Arbitrary Elevation where
   arbitrary = Elevation <$> arbitrary
 
-instance Arbitrary TimeInterval where
-  arbitrary = TimeInterval <$> arbitrary <*> arbitrary <*> arbitrary
-
 instance Arbitrary Time where
-  arbitrary = oneof [pure Current, Time <$> arbitrary]
+  arbitrary = oneof [ Interval <$> arbitrary <*> arbitrary <*> arbitrary
+                    , Time     <$> arbitrary
+                    ]
+
+instance Arbitrary TimeStamp where
+  arbitrary = oneof [pure Current, TimeStamp <$> arbitrary]
 
 instance Arbitrary UpdateSequence where
   arbitrary = fromString <$> listOf1 arbitrary

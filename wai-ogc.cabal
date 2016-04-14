@@ -18,6 +18,7 @@ library
                     ,  Network.Wai.Ogc.Internal.Duration
   build-depends:       base >=4.8 && <5
                      , bytestring
+                     , bytestring-lexing
                      , case-insensitive
                      , spatial-reference
                      , mime

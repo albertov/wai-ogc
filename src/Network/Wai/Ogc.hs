@@ -7,6 +7,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Network.Wai.Ogc (
     OgcRequest       (..)
@@ -20,7 +21,7 @@ module Network.Wai.Ogc (
   , BgColor          (..)
   , Transparent      (..)
   , Time             (..)
-  , TimeInterval     (..)
+  , TimeStamp        (..)
   , Elevation        (..)
   , Dimension        (..)
   , UpdateSequence
@@ -54,6 +55,11 @@ module Network.Wai.Ogc (
   , width
   , height
 
+  -- ** Utils
+  , timeParser
+  , parseTime
+  , renderTime
+
   -- * Re-exports
   , MIME.Type (..)
   , MIME.MIMEType (..)
@@ -65,19 +71,19 @@ module Network.Wai.Ogc (
 
 import           Network.Wai.Ogc.Internal.Duration as Duration
 
-import           Control.Applicative ((<|>))
+import           Control.Applicative ((<|>), optional)
 import           Control.Arrow (first)
 import           Control.Monad (liftM)
 import qualified Codec.MIME.Parse as MIME
 import qualified Codec.MIME.Type as MIME
 import           Data.Attoparsec.ByteString.Char8 as AP
-import           Data.Bits (unsafeShiftR, (.&.))
 import           Data.ByteString (ByteString)
 import           Data.ByteString.Builder ( Builder
                                          , word8HexFixed
                                          , toLazyByteString)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as LBS
+import           Data.ByteString.Lex.Integral (readDecimal, readHexadecimal)
 import           Data.CaseInsensitive (CI)
 import qualified Data.CaseInsensitive as CI
 import qualified Data.List as L
@@ -89,10 +95,11 @@ import           Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Encoding.Error as T
-import           Data.Time (UTCTime, defaultTimeLocale)
-import           Data.Time.Format (formatTime, parseTimeM)
+import           Data.Time (UTCTime(..), defaultTimeLocale)
+import           Data.Time.Calendar (fromGregorian)
+import           Data.Time.Format (formatTime)
 import           Data.Typeable (Typeable)
-import           Data.Word (Word8, Word32)
+import           Data.Word (Word8)
 import           SpatialReference as SR
 import           Network.Wai (Request, queryString)
 import           Network.HTTP.Types.URI (SimpleQuery)
@@ -119,7 +126,7 @@ data OgcRequest
     , wmsMapTransparent      :: Maybe Transparent
     , wmsMapBackground       :: Maybe BgColor
     , wmsMapExceptions       :: Maybe WmsMapExceptions
-    , wmsMapTime             :: Maybe (Either Time TimeInterval)
+    , wmsMapTime             :: Maybe Time
     , wmsMapElevation        :: Maybe Elevation
     , wmsMapDimensions       :: [Dimension]
     }
@@ -278,7 +285,7 @@ instance FromQuery Bbox () where
 
 instance ToQueryItems Bbox c where
   toQueryItems _ (Bbox a b c d) = [ ("BBOX", runBuilder bld)]
-    where bld = mconcat (L.intersperse "," (map showScientific [a, b, c, d]))
+    where bld = mconcat (L.intersperse "," (map show' [a, b, c, d]))
   {-# INLINE toQueryItems #-}
 
 --
@@ -293,13 +300,11 @@ data BgColor =
   } deriving (Eq, Show)
 
 instance FromQuery (Maybe BgColor) () where
-  fromQuery () = optionalParameter "BGCOLOR" $ do
-    hexVal :: Word32 <- stringCI "0x" *> hexadecimal
-    let r = fromIntegral ((hexVal `unsafeShiftR` 16) .&. 0xFF)
-        g = fromIntegral ((hexVal `unsafeShiftR` 8) .&. 0xFF)
-        b = fromIntegral (hexVal .&. 0xFF)
-    if hexVal <= 0xFFFFFF
-       then return (BgColor r g b) else fail "Invalid RGB color"
+  fromQuery () = optionalParameter "BGCOLOR" $
+    BgColor <$> (stringCI "0x" *> parseHex) <*> parseHex <*> parseHex
+    where
+      parseHex = maybe (fail "not an hex") (return . fst)
+             =<< liftM readHexadecimal (AP.take 2)
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems BgColor c where
@@ -317,9 +322,9 @@ data Transparent = Opaque | Transparent
 
 instance FromQuery (Maybe Transparent) () where
   fromQuery () =
-    optionalParameter "TRANSPARENT" $ choice
-      [ stringCI "TRUE"  *> pure Transparent
-      , stringCI "FALSE" *> pure Opaque]
+    optionalParameter "TRANSPARENT"
+      (stringCI "TRUE"  *> pure Transparent <|>
+       stringCI "FALSE" *> pure Opaque)
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems Transparent c where
@@ -369,51 +374,81 @@ instance FromQuery (Maybe Elevation) () where
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems Elevation c where
-  toQueryItems _ (Elevation e) = [("ELEVATION", showScientific e)]
+  toQueryItems _ (Elevation e) = [("ELEVATION", show' e)]
   {-# INLINE toQueryItems #-}
 
 --
 -- * TimeInterval
 --
 
-data Time = Time UTCTime | Current
+data TimeStamp = TimeStamp UTCTime | Current
   deriving (Eq, Show)
 
-data TimeInterval =
-  TimeInterval {
-    tiStart      :: Time
-  , tiEnd        :: Time
-  , tiResolution :: Maybe Duration
-  } deriving (Eq, Show)
+data Time
+  = Time     TimeStamp
+  | Interval TimeStamp TimeStamp (Maybe Duration)
+  deriving (Eq, Show)
 
-instance FromQuery (Maybe (Either Time TimeInterval)) () where
-  fromQuery () = optionalParameter "TIME"
-    ((Right <$> parseInterval) <|> (Left <$> parseTime))
-    where
-      parseInterval =
-        TimeInterval
-          <$> parseTime <* char '/'
-          <*> parseTime
-          <*> (endOfInput *> pure Nothing <|> Just <$> (char '/' *> duration))
-      parseTime = (stringCI "current" *> pure Current)
-              <|> parseFmt "%FT%T%QZ"
-              <|> parseFmt "%F"
-      parseFmt fmt = liftM Time . parseTimeM False defaultTimeLocale fmt
-                 =<< BS.unpack <$> takeWhile1 (/='/')
+instance FromQuery (Maybe Time) () where
+  fromQuery () = optionalParameter "TIME" timeParser
   {-# INLINE fromQuery #-}
 
-instance ToQueryItems (Either Time TimeInterval) c where
-  toQueryItems _ (Left t)  = [("TIME", formatTime' t)]
-  toQueryItems _ (Right (TimeInterval s e Nothing)) =
-    [("TIME", runBuilder (formatTime' s <> "/" <> formatTime' e))]
-  toQueryItems _ (Right (TimeInterval s e (Just d))) = [("TIME", runBuilder b)]
-    where b = formatTime' s <> "/" <> formatTime' e <> "/" <> formatDurationB d
+parseTime :: ByteString -> Either String Time
+parseTime = parseOnly (timeParser <* endOfInput)
+
+timeParser :: Parser Time
+timeParser = parseInterval <|> (Time <$> parseTimeStamp)
+  where
+    parseInterval =
+      Interval
+        <$> parseTimeStamp <* char '/'
+        <*> parseTimeStamp
+        <*> (endOfInput *> pure Nothing <|> Just <$> (char '/' *> duration))
+
+    parseTimeStamp = (stringCI "current" *> pure Current) <|> parseISO
+
+    parseISO = do
+      day <- parseDay1 <|> parseDay2
+      dt <- option 0 (oChar 'T' *> parseDiffTime <* oChar 'Z')
+      return (TimeStamp (UTCTime day dt))
+
+    parseDay1 = fromGregorian <$> (fromIntegral <$> parseIntN 4 <* char '-')
+                              <*> parseIntN 2
+                              <*> option 1 (char '-' *> parseIntN 2)
+
+    parseDay2 = fromGregorian <$> (fromIntegral <$> parseIntN 4 <* oChar '-')
+                              <*> parseIntN 2 <* oChar '-'
+                              <*> parseIntN 2
+
+    parseDiffTime = do
+      h <- fromIntegral <$> parseIntN 2
+      m <- fromIntegral <$> option 0 (oChar ':' *> parseIntN 2)
+      s <- maybe 0 realToFrac <$> optional (oChar ':' *> scientific)
+      return (s + m*60 + h*3600)
+
+    parseIntN :: Int -> Parser Int
+    parseIntN n =
+      maybe (fail "not an int") (return . fst) =<< liftM readDecimal (AP.take n)
+
+    oChar = optional . char
+{-# INLINE timeParser #-}
+
+renderTime :: Time -> ByteString
+renderTime = \case
+  Time (format -> t) -> t
+  Interval (format -> s) (format -> e) Nothing ->
+    runBuilder (s <> "/" <> e)
+  Interval (format -> s) (format -> e) (Just (formatDurationB -> d)) ->
+    runBuilder (s <> "/" <> e <> "/" <> d)
+  where
+    format Current = "current"
+    format (TimeStamp t) =
+      fromString (formatTime defaultTimeLocale "%FT%T%QZ" t)
+{-# INLINE renderTime #-}
+
+instance ToQueryItems Time c where
+  toQueryItems _ t = [("TIME", renderTime t)]
   {-# INLINE toQueryItems #-}
-
-formatTime' :: IsString s => Time -> s
-formatTime' Current  = "current"
-formatTime' (Time t) = fromString (formatTime defaultTimeLocale "%FT%T%QZ" t)
-
 
 --
 -- * Dimension
@@ -483,10 +518,9 @@ instance FromQuery (Maybe WmsMapExceptions) WmsVersion where
                  Wms100 -> simpleParser
                  Wms130 -> simpleParser
                  Wms111 -> mimeParser
-      simpleParser = choice [ stringCI "XML"     *> pure WmsMapExcXml
-                            , stringCI "INIMAGE" *> pure WmsMapExcInImage
-                            , stringCI "BLANK"   *> pure WmsMapExcBlank
-                            ]
+      simpleParser = stringCI "XML"     *> pure WmsMapExcXml
+                 <|> stringCI "INIMAGE" *> pure WmsMapExcInImage
+                 <|> stringCI "BLANK"   *> pure WmsMapExcBlank
       mimeParser = stringCI "application/vnd.ogc_se" *> simpleParser
   {-# INLINE fromQuery #-}
 
@@ -552,16 +586,14 @@ instance FromQuery WmsRequest (Maybe WmsVersion) where
         Just Wms100 -> wms100RequestParser
         Just _      -> wmsRequestParser
         Nothing     -> wmsRequestParser <|> wms100RequestParser
-      wms100RequestParser = choice [
-          stringCI "capabilities" *> pure GetCapabilities
-        , stringCI "map"          *> pure GetMap
-        , stringCI "feature_info" *> pure GetFeatureInfo
-        ]
-      wmsRequestParser = choice [
-          stringCI "GetCapabilities" *> pure GetCapabilities
-        , stringCI "GetMap"          *> pure GetMap
-        , stringCI "GetFeatureInfo"  *> pure GetFeatureInfo
-        ]
+      wms100RequestParser =
+            stringCI "capabilities" *> pure GetCapabilities
+        <|> stringCI "map"          *> pure GetMap
+        <|> stringCI "feature_info" *> pure GetFeatureInfo
+      wmsRequestParser =
+            stringCI "GetCapabilities" *> pure GetCapabilities
+        <|> stringCI "GetMap"          *> pure GetMap
+        <|> stringCI "GetFeatureInfo"  *> pure GetFeatureInfo
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems WmsRequest WmsVersion where
@@ -578,12 +610,10 @@ data Service = WCS | WFS | WMS | WPS
 
 instance FromQuery Service () where
   fromQuery () = mandatoryParameter "SERVICE" $
-    choice [
-      stringCI "WCS" *> pure WCS
-    , stringCI "WFS" *> pure WFS
-    , stringCI "WMS" *> pure WMS
-    , stringCI "WPS" *> pure WPS
-    ]
+        stringCI "WCS" *> pure WCS
+    <|> stringCI "WFS" *> pure WFS
+    <|> stringCI "WMS" *> pure WMS
+    <|> stringCI "WPS" *> pure WPS
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems Service c where
@@ -647,11 +677,10 @@ instance ToQueryItems SR.Crs WmsVersion where
 
 reqCrs :: CI ByteString -> QueryCI -> Either OgcRequestError SR.Crs
 reqCrs key =
-  mandatoryParameter key (coded "EPSG"   <|>
-                          coded "CRS"    <|>
-                          coded "SR-ORG" <|>
-                          named
-                          )
+  mandatoryParameter key $ coded "EPSG"
+                       <|> coded "CRS"
+                       <|> coded "SR-ORG"
+                       <|> named
   where
     named = namedCrs <$> (BS.unpack <$> takeByteString)
     coded code = maybe (fail "invalid coded crs") return =<< mCoded code
@@ -724,9 +753,6 @@ optionalParameter key parser query =
 -- | Parses a query string into case-insensitive elements
 queryStringCI :: Request -> QueryCI
 queryStringCI = map (first CI.mk) . queryString
-
-showScientific :: IsString a => Scientific -> a
-showScientific = show'
 
 runBuilder :: Builder -> ByteString
 runBuilder = LBS.toStrict . toLazyByteString
