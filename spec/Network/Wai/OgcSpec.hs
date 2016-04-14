@@ -130,11 +130,11 @@ wmsMapSpec = describe "GetMap" $ do
       pngFormat = Type (Image "png") []
       mapReq    = wmsMapRequest
         Wms130
+        pngFormat
         [mkLayer' "foo" "foo"]
         epsg23030
-        (mkBbox' 0 0 1 1)
         (mkSize' 1 2)
-        pngFormat
+        (mkBbox' 0 0 1 1)
 
   describe "with missing mandatory parameters" $ do
     wmsUrl "REQUEST=GetMap" `getFailsWith` MissingParameterError "VERSION"
@@ -157,16 +157,15 @@ wmsMapSpec = describe "GetMap" $ do
   renderParseSpec "with no optional parameters" mapReq
 
   renderParseSpec "with unicode layer names"
-    mapReq { wmsMapLayers = [mkLayer' "Avión" ""] }
+    mapReq { wmsLayers = [mkLayer' "Avión" ""] }
 
   renderParseSpec "with two layers with default styles"
-    mapReq { wmsMapLayers = [mkLayer' "Avión" "", mkLayer' "Camión" ""] }
+    mapReq { wmsLayers = [mkLayer' "Avión" "", mkLayer' "Camión" ""] }
 
   describe "with TIME" $ do
-    getMap130
-      (renderRequestQS mapReq <> "&TIME=2000-07-01/2000-07-31/P1D")
+    (renderRequestQS mapReq <> "&TIME=2000-07-01/2000-07-31/P1D")
       `getSucceedsWith` mapReq {
-          wmsMapTime = Just $
+          wmsTime = Just $
             Interval
               (TimeStamp (UTCTime (fromGregorian 2000 7 1) 0))
               (TimeStamp (UTCTime (fromGregorian 2000 7 31) 0))
@@ -228,23 +227,33 @@ newtype GetReq = GetReq OgcRequest
   deriving (Eq, Show)
 
 instance Arbitrary GetReq where
-  arbitrary = GetReq <$> oneof [wmsCap, wmsMap]
+  arbitrary = GetReq <$> oneof [ wmsCap
+                               , wmsReq (pure Nothing)
+                               , wmsReq (Just <$> arbitrary)
+                               ]
     where
       wmsCap = WmsCapabilitiesRequest <$> arbitrary
                                       <*> arbitrary
                                       <*> arbitrary
-      wmsMap = WmsMapRequest <$> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
-                             <*> arbitrary
+      wmsReq q = WmsRequest <$> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> arbitrary
+                            <*> q
+
+instance Arbitrary WmsFeatureInfoQuery where
+  arbitrary = WmsFeatureInfoQuery <$> arbitrary
+                                  <*> arbitrary
+                                  <*> arbitrary
+                                  <*> arbitrary
 instance Arbitrary Type where
   arbitrary = Type <$> arbitrary <*> pure []
     -- FIXME: parseMIMEType does funky things with encoding
@@ -262,11 +271,17 @@ instance Arbitrary MIMEType where
     -- FIXME: parseMIMEType does funky things with encoding
     ]
 
+instance Arbitrary [Name] where
+  arbitrary = listOf1 arbitrary
+
 instance Arbitrary [Layer] where
   arbitrary = listOf1 arbitrary
 
 instance Arbitrary Layer where
   arbitrary = maybe arbitrary return =<< mkLayer <$> arbitrary <*> arbitrary
+
+instance Arbitrary Name where
+  arbitrary = maybe arbitrary return =<< mkName <$> arbitrary
 
 instance Arbitrary Dimension where
   arbitrary = Dimension <$> (T.toUpper <$> arbitrary)
@@ -302,6 +317,12 @@ instance Arbitrary BgColor where
 instance Arbitrary Size where
   arbitrary = mkSize' <$> (getPositive <$> arbitrary)
                       <*> (getPositive <$> arbitrary)
+
+instance Arbitrary Pixel where
+  arbitrary = Pixel <$> arbitrary <*> arbitrary
+
+instance Arbitrary FeatureCount where
+  arbitrary = FeatureCount <$> (getPositive <$> arbitrary)
 
 instance Arbitrary Bbox where
   arbitrary = do

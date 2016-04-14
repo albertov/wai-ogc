@@ -14,10 +14,14 @@ module Network.Wai.Ogc (
   , OgcRequestError  (..)
   , WmsVersion       (..)
   , WmsMapExceptions (..)
+  , WmsFeatureInfoQuery (..)
+  , FeatureCount        (..)
+  , Name
   , Layer
   , Service          (..)
   , Bbox
   , Size
+  , Pixel            (..)
   , BgColor          (..)
   , Transparent      (..)
   , Time             (..)
@@ -38,12 +42,12 @@ module Network.Wai.Ogc (
   , mkLayer
   , mkSize
   , mkBbox
+  , mkName
 
   -- * Accessors
 
-  -- ** 'Layer'
-  , layerName
-  , layerStyle
+  -- ** 'Name'
+  , unName
 
   -- ** 'Bbox'
   , minx
@@ -73,7 +77,7 @@ import           Network.Wai.Ogc.Internal.Duration as Duration
 
 import           Control.Applicative ((<|>), optional)
 import           Control.Arrow (first)
-import           Control.Monad (liftM)
+import           Control.Monad (liftM, (>=>))
 import qualified Codec.MIME.Parse as MIME
 import qualified Codec.MIME.Type as MIME
 import           Data.Attoparsec.ByteString.Char8 as AP
@@ -116,48 +120,51 @@ data OgcRequest
     , wmsCapVersion        :: Maybe WmsVersion
     , wmsCapUpdateSequence :: Maybe UpdateSequence
     }
-  | WmsMapRequest {
-      wmsMapVersion          :: WmsVersion
-    , wmsMapLayers           :: [Layer]
-    , wmsMapCrs              :: SR.Crs
-    , wmsMapBbox             :: Bbox
-    , wmsMapSize             :: Size
-    , wmsMapFormat           :: MIME.Type
-    , wmsMapTransparent      :: Maybe Transparent
-    , wmsMapBackground       :: Maybe BgColor
-    , wmsMapExceptions       :: Maybe WmsMapExceptions
-    , wmsMapTime             :: Maybe Time
-    , wmsMapElevation        :: Maybe Elevation
-    , wmsMapDimensions       :: [Dimension]
+  | WmsRequest {
+      wmsVersion      :: WmsVersion
+    , wmsLayers       :: [Layer]
+    , wmsCrs          :: SR.Crs
+    , wmsBbox         :: Bbox
+    , wmsSize         :: Size
+    , wmsFormat       :: MIME.Type
+    , wmsTransparent  :: Maybe Transparent
+    , wmsBackground   :: Maybe BgColor
+    , wmsExceptions   :: Maybe WmsMapExceptions
+    , wmsTime         :: Maybe Time
+    , wmsElevation    :: Maybe Elevation
+    , wmsDimensions   :: [Dimension]
+    , wmsFeatureQuery :: Maybe WmsFeatureInfoQuery
     }
   | WpsRequest
   deriving (Eq, Show)
+
 
 wmsCapabilitiesRequest :: OgcRequest
 wmsCapabilitiesRequest = WmsCapabilitiesRequest Nothing Nothing Nothing
 
 wmsMapRequest
   :: WmsVersion
+  -> MIME.Type
   -> [Layer]
   -> SR.Crs
-  -> Bbox
   -> Size
-  -> MIME.Type
+  -> Bbox
   -> OgcRequest
-wmsMapRequest version layers crs bbox size format =
-  WmsMapRequest {
-    wmsMapVersion     = version
-  , wmsMapLayers      = layers
-  , wmsMapCrs         = crs
-  , wmsMapBbox        = bbox
-  , wmsMapSize        = size
-  , wmsMapFormat      = format
-  , wmsMapTransparent = Nothing
-  , wmsMapBackground  = Nothing
-  , wmsMapExceptions  = Nothing
-  , wmsMapTime        = Nothing
-  , wmsMapElevation   = Nothing
-  , wmsMapDimensions  = []
+wmsMapRequest version format layers crs size bbox =
+  WmsRequest {
+    wmsVersion      = version
+  , wmsLayers       = layers
+  , wmsCrs          = crs
+  , wmsBbox         = bbox
+  , wmsSize         = size
+  , wmsFormat       = format
+  , wmsTransparent  = Nothing
+  , wmsBackground   = Nothing
+  , wmsExceptions   = Nothing
+  , wmsTime         = Nothing
+  , wmsElevation    = Nothing
+  , wmsDimensions   = []
+  , wmsFeatureQuery = Nothing
   }
 
 data OgcRequestError
@@ -188,27 +195,29 @@ renderRequest WmsCapabilitiesRequest {..} = (query, Nothing)
         toQueryItems version WMS
       , toQueryItems version GetCapabilities
       , toQueryItems version wmsCapVersion
-      , toQueryItems version wmsCapFormat
+      , maybe [] (\fmt -> [("FORMAT", renderMime fmt)]) wmsCapFormat
       , toQueryItems version wmsCapUpdateSequence
       ]
     version = fromMaybe Wms130 wmsCapVersion
-renderRequest WmsMapRequest {..} = (query, Nothing)
+renderRequest WmsRequest {..} = (query, Nothing)
   where
     query = concat [
-        toQueryItems wmsMapVersion WMS
-      , toQueryItems wmsMapVersion GetMap
-      , toQueryItems wmsMapVersion wmsMapVersion
-      , toQueryItems wmsMapVersion wmsMapLayers
-      , toQueryItems wmsMapVersion wmsMapCrs
-      , toQueryItems wmsMapVersion wmsMapBbox
-      , toQueryItems wmsMapVersion wmsMapSize
-      , toQueryItems wmsMapVersion wmsMapFormat
-      , toQueryItems wmsMapVersion wmsMapTransparent
-      , toQueryItems wmsMapVersion wmsMapBackground
-      , toQueryItems wmsMapVersion wmsMapExceptions
-      , toQueryItems wmsMapVersion wmsMapTime
-      , toQueryItems wmsMapVersion wmsMapElevation
-      , toQueryItems wmsMapVersion wmsMapDimensions
+        toQueryItems wmsVersion WMS
+      , toQueryItems wmsVersion
+          (case wmsFeatureQuery of {Just _ -> GetFeatureInfo; _ -> GetMap})
+      , toQueryItems wmsVersion wmsVersion
+      , toQueryItems wmsVersion wmsLayers
+      , toQueryItems wmsVersion wmsCrs
+      , toQueryItems wmsVersion wmsBbox
+      , toQueryItems wmsVersion wmsSize
+      , [("FORMAT", renderMime wmsFormat)]
+      , toQueryItems wmsVersion wmsTransparent
+      , toQueryItems wmsVersion wmsBackground
+      , toQueryItems wmsVersion wmsExceptions
+      , toQueryItems wmsVersion wmsTime
+      , toQueryItems wmsVersion wmsElevation
+      , toQueryItems wmsVersion wmsDimensions
+      , toQueryItems wmsVersion wmsFeatureQuery
       ]
 
 renderRequest _ = error "renderRequest: not implemented"
@@ -217,42 +226,84 @@ renderRequest _ = error "renderRequest: not implemented"
 -- * Layer
 --
 
-data Layer = Layer Text Text
+data WmsFeatureInfoQuery =
+  WmsFeatureInfoQuery {
+    wmsQueryLayers       :: [Name]
+  , wmsQueryFormat       :: MIME.Type
+  , wmsQueryPixel        :: Pixel
+  , wmsQueryFeatureCount :: Maybe FeatureCount
+  } deriving (Eq, Show)
+
+instance ToQueryItems WmsFeatureInfoQuery c where
+  toQueryItems c WmsFeatureInfoQuery {..} =
+    ("QUERY_LAYERS", renderNames wmsQueryLayers) :
+      concat [
+        toQueryItems c wmsQueryFeatureCount
+      , toQueryItems c wmsQueryPixel
+      , [("INFO_FORMAT", renderMime wmsQueryFormat)]
+      , toQueryItems c wmsQueryFeatureCount
+      ]
+  {-# INLINE toQueryItems #-}
+
+
+--
+-- * Name
+--
+
+newtype Name = Name Text
+  deriving (Eq, Show, Ord)
+
+instance IsString Name where
+  fromString s = fromMaybe (error ("fromString (Name): Invalid Name: " ++ s))
+                           (mkName (fromString s))
+
+mkName :: Text -> Maybe Name
+mkName name
+  | Nothing <- T.findIndex (==',') name = Just (Name name)
+  | otherwise                           = Nothing
+
+unName :: Name -> Text
+unName (Name n) = n
+
+namesFromQuery :: CI ByteString -> QueryCI -> Either OgcRequestError [Name]
+namesFromQuery key query =
+  case mandatoryParameter key namesParser query of
+    Left (EmptyParameterError _) -> Right [""]
+    ns                           -> ns
+  where
+    namesParser =
+      (Name . lenientDecodeUtf8 <$> AP.takeWhile (/=',')) `sepBy1` (char ',')
+
+renderNames :: [Name] -> ByteString
+renderNames = BS.intercalate "," . map (T.encodeUtf8 . unName)
+
+--
+-- * Layer
+--
+
+data Layer =
+  Layer {
+    layerName :: Name
+  , layerStyle :: Name
+  }
   deriving (Eq, Show)
 
 mkLayer :: Text -> Text -> Maybe Layer
-mkLayer name style
-  | Nothing <- T.findIndex (==',') name
-  , Nothing <- T.findIndex (==',') style = Just (Layer name style)
-mkLayer _ _ = Nothing
-
-layerName :: Layer -> Text
-layerName (Layer n _) = n
-
-layerStyle :: Layer -> Text
-layerStyle (Layer _ s) = s
+mkLayer name style = Layer <$> mkName name <*> mkName style
 
 instance FromQuery [Layer] () where
   fromQuery () query = do
-    layers <- case mandatoryParameter "LAYERS" parser query of
-          Left (EmptyParameterError _) -> Right [""]
-          ls                           -> ls
-    styles <- case (layers, mandatoryParameter "STYLES" parser query) of
-          ([_], Left (EmptyParameterError _)) -> Right [""]
-          (_ , ss)                            -> ss
-
+    layers <- namesFromQuery "LAYERS" query
+    styles <- namesFromQuery "STYLES" query
     if length layers == length styles
       then Right (zipWith Layer layers styles)
       else Left LayersStylesLengthMismatchError
-    where
-      parser = (lenientDecodeUtf8 <$> AP.takeWhile (/=','))
-                `sepBy1` (char ',')
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems [Layer] c where
   toQueryItems _ ls =
-    [ ("LAYERS", BS.intercalate "," (map (T.encodeUtf8 . layerName) ls))
-    , ("STYLES", BS.intercalate "," (map (T.encodeUtf8 . layerStyle) ls))
+    [ ("LAYERS", renderNames (map layerName ls))
+    , ("STYLES", renderNames (map layerStyle ls))
     ]
   {-# INLINE toQueryItems #-}
 
@@ -351,8 +402,8 @@ height (Size _ h) = h
 
 instance FromQuery Size () where
   fromQuery () query =
-    Size <$> mandatoryParameter "WIDTH" posInt query
-         <*> mandatoryParameter "HEIGHT" posInt query
+    Size <$> mandatoryParameter "WIDTH" positiveInt query
+         <*> mandatoryParameter "HEIGHT" positiveInt query
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems Size c where
@@ -361,6 +412,42 @@ instance ToQueryItems Size c where
   {-# INLINE toQueryItems #-}
 
 
+--
+-- * Pixel
+--
+
+data Pixel =
+  Pixel {
+    pixelRow :: !Int
+  , pixelCol :: !Int
+  } deriving (Eq, Show)
+
+instance FromQuery Pixel () where
+  fromQuery () query =
+    Pixel <$> mandatoryParameter "I" (signed decimal) query
+          <*> mandatoryParameter "J" (signed decimal) query
+  {-# INLINE fromQuery #-}
+
+instance ToQueryItems Pixel c where
+  toQueryItems _ (Pixel i j) =
+    [("I", fromString (show i)) , ("J", fromString (show j))]
+  {-# INLINE toQueryItems #-}
+
+--
+-- * FeatureCount
+--
+
+newtype FeatureCount = FeatureCount Int
+  deriving (Eq, Ord, Show, Num)
+
+instance FromQuery (Maybe FeatureCount) () where
+  fromQuery () =
+    optionalParameter "FEATURE_COUNT" (FeatureCount <$> positiveInt)
+  {-# INLINE fromQuery #-}
+
+instance ToQueryItems FeatureCount c where
+  toQueryItems _ (FeatureCount e) = [("FEATURE_COUNT", show' e)]
+  {-# INLINE toQueryItems #-}
 
 --
 -- * Elevation
@@ -517,11 +604,11 @@ instance FromQuery (Maybe WmsMapExceptions) WmsVersion where
       parser = case version of
                  Wms100 -> simpleParser
                  Wms130 -> simpleParser
-                 Wms111 -> mimeParser
+                 Wms111 -> wms111Parser
       simpleParser = stringCI "XML"     *> pure WmsMapExcXml
                  <|> stringCI "INIMAGE" *> pure WmsMapExcInImage
                  <|> stringCI "BLANK"   *> pure WmsMapExcBlank
-      mimeParser = stringCI "application/vnd.ogc_se" *> simpleParser
+      wms111Parser = stringCI "application/vnd.ogc_se" *> simpleParser
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems WmsMapExceptions WmsVersion where
@@ -626,31 +713,38 @@ parseWmsRequest req = do
   version <- reqWmsVersion
   request <- fromQuery version query
   case request of
-    GetCapabilities -> parseWmsCapabilitiesRequest version
-    GetMap          -> parseWmsMapRequest version
-    GetFeatureInfo  -> Left NotImplementedError
+    GetCapabilities -> parseCapabilitiesRequest version
+    GetMap          -> parseMapRequest version
+    GetFeatureInfo  -> parseFeatureInfoRequest version
   where
     query = queryStringCI req
 
-    parseWmsCapabilitiesRequest wmsCapVersion = do
-      wmsCapFormat <- fromQuery_ query
+    parseCapabilitiesRequest wmsCapVersion = do
+      wmsCapFormat <- optionalParameter "FORMAT" mimeParser query
       wmsCapUpdateSequence <- fromQuery_ query
       return WmsCapabilitiesRequest {..}
 
-    parseWmsMapRequest Nothing = Left (MissingParameterError "VERSION")
-    parseWmsMapRequest (Just wmsMapVersion) = do
-      wmsMapLayers <- fromQuery_ query
-      wmsMapCrs <- fromQuery wmsMapVersion query
-      wmsMapBbox <- fromQuery_ query
-      wmsMapSize <- fromQuery_ query
-      wmsMapFormat <- fromQuery_ query
-      wmsMapTransparent <- fromQuery_ query
-      wmsMapBackground <- fromQuery_ query
-      wmsMapExceptions <- fromQuery wmsMapVersion query
-      wmsMapTime <- fromQuery_ query
-      wmsMapElevation <- fromQuery_ query
-      wmsMapDimensions <- fromQuery_ query
-      return WmsMapRequest {..}
+    parseMapRequest Nothing = Left (MissingParameterError "VERSION")
+    parseMapRequest (Just wmsVersion) = do
+      wmsLayers <- fromQuery_ query
+      wmsCrs <- fromQuery wmsVersion query
+      wmsBbox <- fromQuery_ query
+      wmsSize <- fromQuery_ query
+      wmsFormat <- mandatoryParameter "FORMAT" mimeParser query
+      wmsTransparent <- fromQuery_ query
+      wmsBackground <- fromQuery_ query
+      wmsExceptions <- fromQuery wmsVersion query
+      wmsTime <- fromQuery_ query
+      wmsElevation <- fromQuery_ query
+      wmsDimensions <- fromQuery_ query
+      return WmsRequest {wmsFeatureQuery=Nothing, ..}
+
+    parseFeatureInfoRequest = parseMapRequest >=> \ret -> do
+      wmsQueryLayers <- namesFromQuery "QUERY_LAYERS" query
+      wmsQueryFeatureCount <- fromQuery_ query
+      wmsQueryPixel <- fromQuery_ query
+      wmsQueryFormat <- mandatoryParameter "INFO_FORMAT" mimeParser query
+      return ret { wmsFeatureQuery = Just (WmsFeatureInfoQuery {..}) }
 
     reqWmsVersion =
       case fromQuery Wms100 query of
@@ -688,38 +782,21 @@ reqCrs key =
       SR.codedCrs <$> (BS.unpack <$> stringCI code <* char ':')
                   <*> decimal <* endOfInput
 
+mimeParser:: Parser MIME.Type
+mimeParser = maybe (fail "Invalid MIME") return
+          =<< (MIME.parseMIMEType . lenientDecodeUtf8 <$> takeByteString)
 
-
-instance FromQuery (Maybe MIME.Type) () where
-  fromQuery () query =
-    case L.lookup "FORMAT" query of
-      Just (Just fmt)
-        | Just mime <- parseMIME fmt -> Right (Just mime)
-        | otherwise -> Left  (InvalidParameterError "FORMAT" fmt)
-      Just Nothing  -> Left  (EmptyParameterError "FORMAT")
-      Nothing       -> Right Nothing
-    where
-      parseMIME = MIME.parseMIMEType . lenientDecodeUtf8
-  {-# INLINE fromQuery #-}
-
-instance FromQuery MIME.Type () where
-  fromQuery ()
-    = either Left (maybe (Left (MissingParameterError "FORMAT")) Right)
-    . fromQuery ()
-  {-# INLINE fromQuery #-}
-
-instance ToQueryItems MIME.Type c where
-  toQueryItems _ a = [("FORMAT", T.encodeUtf8 (MIME.showType a))]
-  {-# INLINE toQueryItems #-}
+renderMime :: MIME.Type -> ByteString
+renderMime = T.encodeUtf8 . MIME.showType
 
 --
 -- * Utils
 --
 
-posInt :: Parser Int
-posInt = do
+positiveInt :: Parser Int
+positiveInt = do
   n <- decimal
-  if n==0 then fail "Negative number" else return n
+  if n<=0 then fail "Negative number" else return n
 
 lenientDecodeUtf8 :: ByteString -> Text
 lenientDecodeUtf8 = T.decodeUtf8With T.lenientDecode
