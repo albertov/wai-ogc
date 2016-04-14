@@ -11,6 +11,7 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
 import           Data.Time (UTCTime(..))
 import           Data.Time.Calendar (fromGregorian)
+import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
 import           Data.String (IsString, fromString)
 import           Network.Wai (Application, responseLBS)
@@ -128,7 +129,12 @@ wmsMapSpec = describe "GetMap" $ do
       epsg23030 = maybe (error "should not happen") id (epsgCrs 23030)
       pngFormat = Type (Image "png") []
       mapReq    = wmsMapRequest
-        Wms130 [Layer "foo" "foo"] epsg23030 (Bbox 0 0 1 1) (Size 1 2) pngFormat
+        Wms130
+        [mkLayer' "foo" "foo"]
+        epsg23030
+        (mkBbox' 0 0 1 1)
+        (mkSize' 1 2)
+        pngFormat
 
   describe "with missing mandatory parameters" $ do
     wmsUrl "REQUEST=GetMap" `getFailsWith` MissingParameterError "VERSION"
@@ -151,10 +157,10 @@ wmsMapSpec = describe "GetMap" $ do
   renderParseSpec "with no optional parameters" mapReq
 
   renderParseSpec "with unicode layer names"
-    mapReq { wmsMapLayers = [Layer "Avión" ""] }
+    mapReq { wmsMapLayers = [mkLayer' "Avión" ""] }
 
   renderParseSpec "with two layers with default styles"
-    mapReq { wmsMapLayers = [Layer "Avión" "", Layer "Camión" ""] }
+    mapReq { wmsMapLayers = [mkLayer' "Avión" "", mkLayer' "Camión" ""] }
 
   describe "with TIME" $ do
     getMap130
@@ -167,10 +173,28 @@ wmsMapSpec = describe "GetMap" $ do
               (Just (DurationDate (DurDateDay (DurDay 1) Nothing)))
           }
 
-  describe "with layers and styles length mismatch" $ do
+  describe "miscelaneous invalid requests" $ do
     getMap130 "LAYERS=foo,bar&STYLES=foo"
       `getFailsWith` LayersStylesLengthMismatchError
+    getMap130
+      "LAYERS=f&STYLES=f&CRS=EPSG:1&BBOX=0,0,0,1&WIDTH=1&HEIGHT=1&FORMAT=image/png"
+      `getFailsWith` InvalidParameterError "BBOX" "0,0,0,1"
+    getMap130
+      "LAYERS=f&STYLES=f&CRS=EPSG:1&BBOX=0,0,1,1&WIDTH=0&HEIGHT=1&FORMAT=image/png"
+      `getFailsWith` InvalidParameterError "WIDTH" "0"
+    getMap130
+      "LAYERS=f&STYLES=f&CRS=EPSG:1&BBOX=0,0,1,1&WIDTH=-1&HEIGHT=1&FORMAT=image/png"
+      `getFailsWith` InvalidParameterError "WIDTH" "-1"
 
+mkLayer' :: T.Text -> T.Text -> Layer
+mkLayer' n = fromMaybe (error "mkLayer': Invalid layer") . mkLayer n
+
+mkSize' :: Int -> Int -> Size
+mkSize' w = fromMaybe (error "mkSize': Invalid Size") . mkSize w
+
+mkBbox' :: Scientific -> Scientific -> Scientific -> Scientific -> Bbox
+mkBbox' x0 y0 x1 =
+  fromMaybe (error "mkBbox': Invalid Bbox") . mkBbox x0 y0 x1
 
 --
 -- * Utils
@@ -242,12 +266,7 @@ instance Arbitrary [Layer] where
   arbitrary = listOf1 arbitrary
 
 instance Arbitrary Layer where
-  arbitrary = do
-    name  <- arbitrary
-    style <- arbitrary
-    if ',' `elem` name || ',' `elem` style
-       then arbitrary
-       else return (Layer (fromString name) (fromString style))
+  arbitrary = maybe arbitrary return =<< mkLayer <$> arbitrary <*> arbitrary
 
 instance Arbitrary Dimension where
   arbitrary = Dimension <$> (T.toUpper <$> arbitrary)
@@ -279,8 +298,8 @@ instance Arbitrary BgColor where
   arbitrary = BgColor <$> arbitrary <*> arbitrary <*> arbitrary
 
 instance Arbitrary Size where
-  arbitrary = Size <$> (getPositive <$> arbitrary)
-                   <*> (getPositive <$> arbitrary)
+  arbitrary = mkSize' <$> (getPositive <$> arbitrary)
+                      <*> (getPositive <$> arbitrary)
 
 instance Arbitrary Bbox where
   arbitrary = do
@@ -288,11 +307,11 @@ instance Arbitrary Bbox where
     y0 <- arbitrary
     w <- getPositive <$> arbitrary
     h <- getPositive <$> arbitrary
-    return (Bbox x0 y0 (x0 + w) (y0 + h))
+    return (mkBbox' x0 y0 (x0 + w) (y0 + h))
 
 instance Arbitrary Crs where
-  arbitrary = oneof [named, epsg]
+  arbitrary = oneof [named, coded "EPSG", coded "CRS", coded "SR-ORG"]
     where
-      named = namedCrs <$> listOf1 arbitrary
-      epsg = maybe epsg return
-          =<< (epsgCrs <$> (getNonNegative <$> arbitrary))
+      named      = namedCrs <$> listOf1 arbitrary
+      coded name = maybe (coded name) return
+               =<< (codedCrs name <$> (getNonNegative <$> arbitrary))
