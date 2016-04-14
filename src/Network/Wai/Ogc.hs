@@ -14,8 +14,7 @@ module Network.Wai.Ogc (
   , OgcRequestError  (..)
   , WmsVersion       (..)
   , WmsMapExceptions (..)
-  , WmsFeatureInfoQuery (..)
-  , FeatureCount        (..)
+  , FeatureCount     (..)
   , Name
   , Layer
   , Service          (..)
@@ -77,7 +76,7 @@ import           Network.Wai.Ogc.Internal.Duration as Duration
 
 import           Control.Applicative ((<|>), optional)
 import           Control.Arrow (first)
-import           Control.Monad (liftM, (>=>))
+import           Control.Monad (liftM)
 import qualified Codec.MIME.Parse as MIME
 import qualified Codec.MIME.Type as MIME
 import           Data.Attoparsec.ByteString.Char8 as AP
@@ -120,7 +119,7 @@ data OgcRequest
     , wmsCapVersion        :: Maybe WmsVersion
     , wmsCapUpdateSequence :: Maybe UpdateSequence
     }
-  | WmsRequest {
+  | WmsMapRequest {
       wmsVersion      :: WmsVersion
     , wmsLayers       :: [Layer]
     , wmsCrs          :: SR.Crs
@@ -133,7 +132,24 @@ data OgcRequest
     , wmsTime         :: Maybe Time
     , wmsElevation    :: Maybe Elevation
     , wmsDimensions   :: [Dimension]
-    , wmsFeatureQuery :: Maybe WmsFeatureInfoQuery
+    }
+  | WmsFeatureInfoRequest {
+      wmsVersion      :: WmsVersion
+    , wmsLayers       :: [Layer]
+    , wmsCrs          :: SR.Crs
+    , wmsBbox         :: Bbox
+    , wmsSize         :: Size
+    , wmsFormat       :: MIME.Type
+    , wmsQueryLayers  :: [Name]
+    , wmsInfoFormat   :: MIME.Type
+    , wmsPixel        :: Pixel
+    , wmsFeatureCount :: Maybe FeatureCount
+    , wmsTransparent  :: Maybe Transparent
+    , wmsBackground   :: Maybe BgColor
+    , wmsExceptions   :: Maybe WmsMapExceptions
+    , wmsTime         :: Maybe Time
+    , wmsElevation    :: Maybe Elevation
+    , wmsDimensions   :: [Dimension]
     }
   | WpsRequest
   deriving (Eq, Show)
@@ -151,7 +167,7 @@ wmsMapRequest
   -> Bbox
   -> OgcRequest
 wmsMapRequest version format layers crs size bbox =
-  WmsRequest {
+  WmsMapRequest {
     wmsVersion      = version
   , wmsLayers       = layers
   , wmsCrs          = crs
@@ -164,7 +180,6 @@ wmsMapRequest version format layers crs size bbox =
   , wmsTime         = Nothing
   , wmsElevation    = Nothing
   , wmsDimensions   = []
-  , wmsFeatureQuery = Nothing
   }
 
 data OgcRequestError
@@ -199,12 +214,11 @@ renderRequest WmsCapabilitiesRequest {..} = (query, Nothing)
       , toQueryItems version wmsCapUpdateSequence
       ]
     version = fromMaybe Wms130 wmsCapVersion
-renderRequest WmsRequest {..} = (query, Nothing)
+renderRequest WmsMapRequest {..} = (query, Nothing)
   where
     query = concat [
         toQueryItems wmsVersion WMS
-      , toQueryItems wmsVersion
-          (case wmsFeatureQuery of {Just _ -> GetFeatureInfo; _ -> GetMap})
+      , toQueryItems wmsVersion GetMap
       , toQueryItems wmsVersion wmsVersion
       , toQueryItems wmsVersion wmsLayers
       , toQueryItems wmsVersion wmsCrs
@@ -217,7 +231,29 @@ renderRequest WmsRequest {..} = (query, Nothing)
       , toQueryItems wmsVersion wmsTime
       , toQueryItems wmsVersion wmsElevation
       , toQueryItems wmsVersion wmsDimensions
-      , toQueryItems wmsVersion wmsFeatureQuery
+      ]
+renderRequest WmsFeatureInfoRequest {..} = (query, Nothing)
+  where
+    query = concat [
+        toQueryItems wmsVersion WMS
+      , toQueryItems wmsVersion GetFeatureInfo
+      , toQueryItems wmsVersion wmsVersion
+      , toQueryItems wmsVersion wmsLayers
+      , toQueryItems wmsVersion wmsCrs
+      , toQueryItems wmsVersion wmsBbox
+      , toQueryItems wmsVersion wmsSize
+      , [("FORMAT", renderMime wmsFormat)]
+      , toQueryItems wmsVersion wmsTransparent
+      , toQueryItems wmsVersion wmsBackground
+      , toQueryItems wmsVersion wmsExceptions
+      , toQueryItems wmsVersion wmsTime
+      , toQueryItems wmsVersion wmsElevation
+      , toQueryItems wmsVersion wmsDimensions
+      , [ ("QUERY_LAYERS", renderNames wmsQueryLayers)
+        , ("INFO_FORMAT", renderMime wmsInfoFormat)
+        ]
+      , toQueryItems wmsVersion wmsFeatureCount
+      , toQueryItems wmsVersion wmsPixel
       ]
 
 renderRequest _ = error "renderRequest: not implemented"
@@ -225,25 +261,6 @@ renderRequest _ = error "renderRequest: not implemented"
 --
 -- * Layer
 --
-
-data WmsFeatureInfoQuery =
-  WmsFeatureInfoQuery {
-    wmsQueryLayers       :: [Name]
-  , wmsQueryFormat       :: MIME.Type
-  , wmsQueryPixel        :: Pixel
-  , wmsQueryFeatureCount :: Maybe FeatureCount
-  } deriving (Eq, Show)
-
-instance ToQueryItems WmsFeatureInfoQuery c where
-  toQueryItems c WmsFeatureInfoQuery {..} =
-    ("QUERY_LAYERS", renderNames wmsQueryLayers) :
-      concat [
-        toQueryItems c wmsQueryFeatureCount
-      , toQueryItems c wmsQueryPixel
-      , [("INFO_FORMAT", renderMime wmsQueryFormat)]
-      , toQueryItems c wmsQueryFeatureCount
-      ]
-  {-# INLINE toQueryItems #-}
 
 
 --
@@ -737,14 +754,26 @@ parseWmsRequest req = do
       wmsTime <- fromQuery_ query
       wmsElevation <- fromQuery_ query
       wmsDimensions <- fromQuery_ query
-      return WmsRequest {wmsFeatureQuery=Nothing, ..}
+      return WmsMapRequest {..}
 
-    parseFeatureInfoRequest = parseMapRequest >=> \ret -> do
+    parseFeatureInfoRequest Nothing = Left (MissingParameterError "VERSION")
+    parseFeatureInfoRequest (Just wmsVersion) = do
+      wmsLayers <- fromQuery_ query
+      wmsCrs <- fromQuery wmsVersion query
+      wmsBbox <- fromQuery_ query
+      wmsSize <- fromQuery_ query
+      wmsFormat <- mandatoryParameter "FORMAT" mimeParser query
+      wmsTransparent <- fromQuery_ query
+      wmsBackground <- fromQuery_ query
+      wmsExceptions <- fromQuery wmsVersion query
+      wmsTime <- fromQuery_ query
+      wmsElevation <- fromQuery_ query
+      wmsDimensions <- fromQuery_ query
       wmsQueryLayers <- namesFromQuery "QUERY_LAYERS" query
-      wmsQueryFeatureCount <- fromQuery_ query
-      wmsQueryPixel <- fromQuery_ query
-      wmsQueryFormat <- mandatoryParameter "INFO_FORMAT" mimeParser query
-      return ret { wmsFeatureQuery = Just (WmsFeatureInfoQuery {..}) }
+      wmsFeatureCount <- fromQuery_ query
+      wmsPixel <- fromQuery_ query
+      wmsInfoFormat <- mandatoryParameter "INFO_FORMAT" mimeParser query
+      return WmsFeatureInfoRequest {..}
 
     reqWmsVersion =
       case fromQuery Wms100 query of

@@ -228,32 +228,22 @@ newtype GetReq = GetReq OgcRequest
 
 instance Arbitrary GetReq where
   arbitrary = GetReq <$> oneof [ wmsCap
-                               , wmsReq (pure Nothing)
-                               , wmsReq (Just <$> arbitrary)
+                               , wmsMap
+                               , wmsFeatureInfo
                                ]
     where
-      wmsCap = WmsCapabilitiesRequest <$> arbitrary
-                                      <*> arbitrary
-                                      <*> arbitrary
-      wmsReq q = WmsRequest <$> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> arbitrary
-                            <*> q
+      wmsCap = WmsCapabilitiesRequest
+        <$> arbitrary <*> arbitrary <*> arbitrary
+      wmsMap = WmsMapRequest
+        <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+        <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+        <*> arbitrary <*> arbitrary
+      wmsFeatureInfo = WmsFeatureInfoRequest
+        <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+        <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+        <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+        <*> arbitrary
 
-instance Arbitrary WmsFeatureInfoQuery where
-  arbitrary = WmsFeatureInfoQuery <$> arbitrary
-                                  <*> arbitrary
-                                  <*> arbitrary
-                                  <*> arbitrary
 instance Arbitrary Type where
   arbitrary = Type <$> arbitrary <*> pure []
     -- FIXME: parseMIMEType does funky things with encoding
