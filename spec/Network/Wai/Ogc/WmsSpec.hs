@@ -1,10 +1,11 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleInstances #-}
-module Network.Wai.OgcSpec (main, spec) where
+module Network.Wai.Ogc.WmsSpec (main, spec) where
 
 import           Network.Wai.Ogc.Internal.DurationSpec ()
-import           Network.Wai.Ogc
+import           Network.Wai.Ogc.Wms
 
 import           Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as BS
@@ -14,9 +15,9 @@ import           Data.Time.Calendar (fromGregorian)
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
 import           Data.String (IsString, fromString)
-import           Network.Wai (Application, responseLBS)
+import           Network.Wai (Application, responseLBS, queryString)
 import           Network.HTTP.Types (status200, status400)
-import           Network.HTTP.Types.URI (renderSimpleQuery)
+import           Network.HTTP.Types.URI (renderQuery)
 import           Test.QuickCheck (getPositive, getNonNegative)
 import           Test.QuickCheck.Instances ()
 import           Test.Hspec
@@ -34,22 +35,22 @@ app req respond = do
       [("Content-Type", "text/plain")]
       (fromString body)
   where
-    (body, status) = case parseRequest req of
-      Right r -> (show r, status200)
-      Left  e -> (show e, status400)
+    (body, status) = case parseRequest (queryString req) Nothing of
+      Right (r :: Request ) -> (show r, status200)
+      Left  e               -> (show e, status400)
 
 spec :: Spec
 spec = with (return app) $ do
-  commonSpec
   wmsSpec
 
-  it "can parse a rendered arbitrary GET OgcRequest" $
+  it "can parse a rendered arbitrary GET Request" $
     property  $ \(GetReq req) ->
       let body = fromString (show req)
           url  = renderRequestQS' req
       in get url `shouldRespondWith` body {matchStatus=200}
 
 
+{-
 commonSpec :: SpecWith Application
 commonSpec = describe "common" $ do
   "/" `getFailsWith` MissingParameterError "SERVICE"
@@ -57,6 +58,7 @@ commonSpec = describe "common" $ do
   "/?SERVICE=" `getFailsWith` EmptyParameterError "SERVICE"
   "/?SeRViCe" `getFailsWith` EmptyParameterError "SERVICE"
   "/?SeRViCe=foo" `getFailsWith` InvalidParameterError "SERVICE" "foo"
+-}
 
 wmsUrl :: (IsString a, Monoid a) => a -> a
 wmsUrl = ("?SERVICE=WMS&" <>)
@@ -157,15 +159,15 @@ wmsMapSpec = describe "GetMap" $ do
   renderParseSpec "with no optional parameters" mapReq
 
   renderParseSpec "with unicode layer names"
-    mapReq { wmsLayers = [mkLayer' "Avión" ""] }
+    mapReq { wmsMapLayers = [mkLayer' "Avión" ""] }
 
   renderParseSpec "with two layers with default styles"
-    mapReq { wmsLayers = [mkLayer' "Avión" "", mkLayer' "Camión" ""] }
+    mapReq { wmsMapLayers = [mkLayer' "Avión" "", mkLayer' "Camión" ""] }
 
   describe "with TIME" $ do
     (renderRequestQS mapReq <> "&TIME=2000-07-01/2000-07-31/P1D")
       `getSucceedsWith` mapReq {
-          wmsTime = Just $
+          wmsMapTime = Just $
             Interval
               (TimeStamp (UTCTime (fromGregorian 2000 7 1) 0))
               (TimeStamp (UTCTime (fromGregorian 2000 7 31) 0))
@@ -199,31 +201,31 @@ mkBbox' x0 y0 x1 =
 -- * Utils
 --
 
-renderRequestQS :: OgcRequest -> String
+renderRequestQS :: Request -> String
 renderRequestQS = BS.unpack . renderRequestQS'
 
-renderRequestQS' :: OgcRequest -> ByteString
-renderRequestQS' = renderSimpleQuery True . fst . renderRequest
+renderRequestQS' :: Request -> ByteString
+renderRequestQS' = renderQuery True . fst . renderRequest
 
-renderParseSpec :: String -> OgcRequest -> SpecWith Application
+renderParseSpec :: String -> Request -> SpecWith Application
 renderParseSpec name req =
   describe name (renderRequestQS req `getSucceedsWith` req)
 
-getFailsWith :: String -> OgcRequestError -> SpecWith Application
+getFailsWith :: String -> ParseError -> SpecWith Application
 getFailsWith url err =
   describe ("GET " ++ url) $
     it ("fails with " ++ show err) $
       let body = fromString (show err)
       in get (fromString url) `shouldRespondWith` body {matchStatus = 400}
 
-getSucceedsWith :: String -> OgcRequest -> SpecWith Application
+getSucceedsWith :: String -> Request -> SpecWith Application
 getSucceedsWith url req =
   describe ("GET " ++ url) $
     it ("succeeds with " ++ show req) $
       let body = fromString (show req)
       in get (fromString url) `shouldRespondWith` body {matchStatus = 200}
 
-newtype GetReq = GetReq OgcRequest
+newtype GetReq = GetReq Request
   deriving (Eq, Show)
 
 instance Arbitrary GetReq where
@@ -232,15 +234,16 @@ instance Arbitrary GetReq where
                                , wmsFeatureInfo
                                ]
     where
-      wmsCap = WmsCapabilitiesRequest
+      wmsCap = CapabilitiesRequest
         <$> arbitrary <*> arbitrary <*> arbitrary
-      wmsMap = WmsMapRequest
+      wmsMap = MapRequest
         <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
         <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
         <*> arbitrary <*> arbitrary
-      wmsFeatureInfo = WmsFeatureInfoRequest
+      wmsFeatureInfo = FeatureInfoRequest
         <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
-        <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+        <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+        <*> (fmap getPositive <$> arbitrary)
         <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
         <*> arbitrary
 
@@ -278,9 +281,6 @@ instance Arbitrary Dimension where
                         <*> (fromString <$> listOf1 arbitrary)
 
 
-instance Arbitrary Elevation where
-  arbitrary = Elevation <$> arbitrary
-
 instance Arbitrary Time where
   arbitrary = oneof [ Interval <$> arbitrary <*> arbitrary <*> arbitrary
                     , Time     <$> arbitrary
@@ -292,13 +292,13 @@ instance Arbitrary TimeStamp where
 instance Arbitrary UpdateSequence where
   arbitrary = fromString <$> listOf1 arbitrary
 
-instance Arbitrary WmsMapExceptions where
+instance Arbitrary Exceptions where
   arbitrary = elements [minBound..maxBound]
 
 instance Arbitrary Transparent where
   arbitrary = elements [minBound..maxBound]
 
-instance Arbitrary WmsVersion where
+instance Arbitrary Version where
   arbitrary = elements [minBound..maxBound]
 
 instance Arbitrary BgColor where
@@ -310,9 +310,6 @@ instance Arbitrary Size where
 
 instance Arbitrary Pixel where
   arbitrary = Pixel <$> arbitrary <*> arbitrary
-
-instance Arbitrary FeatureCount where
-  arbitrary = FeatureCount <$> (getPositive <$> arbitrary)
 
 instance Arbitrary Bbox where
   arbitrary = do

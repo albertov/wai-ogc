@@ -15,6 +15,8 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Network.Wai.Ogc
+                    ,  Network.Wai.Ogc.Wms
+                    ,  Network.Wai.Ogc.Common
                     ,  Network.Wai.Ogc.Internal.Duration
   build-depends:       base >=4.8 && <5
                      , bytestring
@@ -27,7 +29,6 @@ library
                      , attoparsec
                      , scientific
                      , http-types
-                     , wai
   default-language:    Haskell2010
   ghc-options:         -Wall
                        -Werror
@@ -52,7 +53,7 @@ test-suite spec
                      , time
   hs-source-dirs:      spec
   main-is:             Spec.hs
-  other-modules:       Network.Wai.OgcSpec
+  other-modules:       Network.Wai.Ogc.WmsSpec
                      , Network.Wai.Ogc.Internal.DurationSpec
   default-language:    Haskell2010
   ghc-options:         -Wall
