@@ -15,7 +15,7 @@ module Network.Wai.Ogc.Common (
   , ParseError       (..)
   , Name
   , Service          (..)
-  , Bbox
+  , Bbox             (..)
   , Size
   , Time             (..)
   , TimeStamp        (..)
@@ -34,12 +34,6 @@ module Network.Wai.Ogc.Common (
 
   -- ** 'Name'
   , unName
-
-  -- ** 'Bbox'
-  , minx
-  , miny
-  , maxx
-  , maxy
 
   -- ** 'Size
   , width
@@ -165,33 +159,18 @@ renderNames = BS.intercalate "," . map (T.encodeUtf8 . unName)
 -- * Bbox
 --
 
-data Bbox = Bbox !Scientific !Scientific !Scientific !Scientific
-  deriving (Eq, Show)
+data Bbox =
+  Bbox {
+    minx :: !Scientific
+  , miny :: !Scientific
+  , maxx :: !Scientific
+  , maxy :: !Scientific
+  } deriving (Eq, Show)
 
 mkBbox :: Scientific -> Scientific -> Scientific -> Scientific -> Maybe Bbox
 mkBbox x0 y0 x1 y1
   | x1>x0 && y1>y0 = Just (Bbox x0 y0 x1 y1)
   | otherwise      = Nothing
-
-minx, miny, maxx, maxy :: Bbox -> Scientific
-minx (Bbox a _ _ _) = a
-miny (Bbox _ a _ _) = a
-maxx (Bbox _ _ a _) = a
-maxy (Bbox _ _ _ a) = a
-
-instance FromQuery Bbox () where
-  fromQuery () = mandatoryParameter "BBOX" $ do
-    x0 <- scientific <* char ','
-    y0 <- scientific <* char ','
-    x1 <- scientific <* char ','
-    y1 <- scientific
-    maybe (fail "Invalid bbox") return (mkBbox x0 y0 x1 y1)
-  {-# INLINE fromQuery #-}
-
-instance ToQueryItems Bbox c where
-  toQueryItems _ (Bbox a b c d) = [ ("BBOX", runBuilder bld)]
-    where bld = mconcat (L.intersperse "," (map show' [a, b, c, d]))
-  {-# INLINE toQueryItems #-}
 
 --
 -- * Size
