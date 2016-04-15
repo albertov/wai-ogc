@@ -12,7 +12,6 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE NamedFieldPuns #-}
 
 
 module Network.Wai.Ogc.Wms (
@@ -49,7 +48,6 @@ import qualified Codec.MIME.Type as MIME
 import           Data.Attoparsec.ByteString.Char8 as AP
 import           Data.ByteString.Builder (word8HexFixed)
 import           Data.ByteString.Lex.Integral (readHexadecimal)
-import qualified Data.List as L
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
 import           Data.String (fromString)
@@ -199,7 +197,7 @@ instance Common.Request (Request Map) where
                  =<< reqVersion query
     wmsMapLayers <- fromQuery_ query
     wmsMapCrs <- fromQuery wmsMapVersion query
-    wmsMapBbox <- fromQuery wmsMapVersion query
+    wmsMapBbox <- fromQuery_ query
     wmsMapSize <- fromQuery_ query
     wmsMapFormat <- mandatoryParameter "FORMAT" mimeParser query
     wmsMapTransparent <- fromQuery_ query
@@ -459,10 +457,6 @@ instance ToQueryItems RequestType Version where
   {-# INLINE toQueryItems #-}
 
 
---
--- * Crs instances
---
-
 instance FromQuery Crs Version where
   fromQuery Wms130 = mandatoryParameter "CRS" crsParser
   fromQuery _      = mandatoryParameter "SRS" crsParser
@@ -471,32 +465,4 @@ instance FromQuery Crs Version where
 instance ToQueryItems Crs Version where
   toQueryItems Wms130 crs = [("CRS", renderCrs crs)]
   toQueryItems _      crs = [("SRS", renderCrs crs)]
-  {-# INLINE toQueryItems #-}
-
-
---
--- * Bbox instances
---
-
-
-instance FromQuery Bbox Version where
-  fromQuery version = mandatoryParameter "BBOX" $ do
-    c0 <- scientific <* char ','
-    c1 <- scientific <* char ','
-    c2 <- scientific <* char ','
-    c3 <- scientific
-    let (x0,y0,x1,y1) =
-          case version of
-            Wms130 -> (c1,c0,c3,c2) -- 1.3.0 has lat/lon axis ordering
-            _      -> (c0,c1,c2,c3)
-    maybe (fail "Invalid bbox") return (mkBbox x0 y0 x1 y1)
-  {-# INLINE fromQuery #-}
-
-instance ToQueryItems Bbox Version where
-  toQueryItems version Bbox{minx,miny,maxx,maxy} = [ ("BBOX", runBuilder bld)]
-    where
-      bld = mconcat (L.intersperse "," (map show' coords))
-      coords = case version of
-        Wms130 -> [miny, minx, maxy, maxx]
-        _      -> [minx, miny, maxx, maxy]
   {-# INLINE toQueryItems #-}
