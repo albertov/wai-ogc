@@ -54,6 +54,8 @@ module Network.Wai.Ogc.Common (
   , fromQuery_
   , mimeParser
   , renderMime
+  , renderCrs
+  , crsParser
   , queryCI
   , optionalParameter
   , mandatoryParameter
@@ -115,7 +117,7 @@ data ParseError
   | InvalidParameterError           ByteString ByteString
   | LayersStylesLengthMismatchError
   | NotImplementedError
-  deriving (Show, Typeable)
+  deriving (Show, Eq, Typeable)
 
 class Request a where
   parseRequest :: Query -> Maybe ByteString -> Either ParseError a
@@ -376,35 +378,19 @@ instance ToQueryItems Service c where
   {-# INLINE toQueryItems #-}
 
 
-{-
-instance FromQuery SR.Crs WmsVersion where
-  fromQuery Wms130 = reqCrs "CRS"
-  fromQuery _      = reqCrs "SRS"
-  {-# INLINE fromQuery #-}
-
-instance ToQueryItems SR.Crs WmsVersion where
-  toQueryItems Wms130 (Coded code val) =
-    [("CRS", runBuilder (fromString code <> ":" <> show' val))]
-  toQueryItems _ (Coded code val) =
-    [("SRS", runBuilder (fromString code <> ":" <> show' val))]
-  toQueryItems Wms130 (Named name) = [("CRS", fromString name)]
-  toQueryItems _      (Named name) = [("SRS", fromString name)]
-  toQueryItems _      _            = [] -- let the remote server decide
-  {-# INLINE toQueryItems #-}
-
-reqCrs :: CI ByteString -> QueryCI -> Either ParseError SR.Crs
-reqCrs key =
-  mandatoryParameter key $ coded "EPSG"
-                       <|> coded "CRS"
-                       <|> coded "SR-ORG"
-                       <|> named
+crsParser :: Parser Crs
+crsParser = coded "EPSG" <|> coded "CRS" <|> coded "SR-ORG" <|> named
   where
     named = namedCrs <$> (BS.unpack <$> takeByteString)
     coded code = maybe (fail "invalid coded crs") return =<< mCoded code
     mCoded code =
       SR.codedCrs <$> (BS.unpack <$> stringCI code <* char ':')
                   <*> decimal <* endOfInput
--}
+
+renderCrs :: Crs -> ByteString
+renderCrs (Coded code val) = runBuilder (fromString code <> ":" <> show' val)
+renderCrs (Named name)     = fromString name
+renderCrs _                = error "renderCrs: Not implemented"
 
 mimeParser:: Parser MIME.Type
 mimeParser = maybe (fail "Invalid MIME") return

@@ -12,7 +12,7 @@ data Request
   = Wcs
   | Wfs
   | Wps
-  | Wms Wms.Request
+  | Wms Wms.SomeRequest
   deriving (Show, Eq)
 
 {-

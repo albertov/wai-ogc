@@ -9,15 +9,23 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE StandaloneDeriving #-}
+
 
 module Network.Wai.Ogc.Wms (
     Request     (..)
+  , SomeRequest (..)
   , Version     (..)
   , Exceptions  (..)
   , BgColor     (..)
   , Transparent (..)
   , Layer       (..)
   , Pixel       (..)
+  , Capabilities
+  , Map
+  , FeatureInfo
 
   -- * 'Request' constructors
   , wmsCapabilitiesRequest
@@ -37,11 +45,8 @@ import           Control.Applicative ((<|>))
 import           Control.Monad (liftM)
 import qualified Codec.MIME.Type as MIME
 import           Data.Attoparsec.ByteString.Char8 as AP
-import           Data.ByteString (ByteString)
 import           Data.ByteString.Builder (word8HexFixed)
-import qualified Data.ByteString.Char8 as BS
 import           Data.ByteString.Lex.Integral (readHexadecimal)
-import           Data.CaseInsensitive (CI)
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
 import           Data.String (fromString)
@@ -55,18 +60,36 @@ import           Network.HTTP.Types.URI (simpleQueryToQuery)
 --
 
 data RequestType
-  = GetCapabilities
-  | GetMap
-  | GetFeatureInfo
+  = Capabilities
+  | Map
+  | FeatureInfo
   deriving (Show, Typeable)
 
-data Request
-  = CapabilitiesRequest {
+type Capabilities = 'Capabilities
+type Map          = 'Map
+type FeatureInfo  = 'FeatureInfo
+
+data SomeRequest where
+  SomeRequest
+    :: forall a. (Common.Request (Request a), Show (Request a), Eq (Request a))
+     => Request a -> SomeRequest
+
+instance Show SomeRequest where
+  show (SomeRequest r) = show r
+
+instance Eq SomeRequest where
+  SomeRequest a@GetMap{}          == SomeRequest b@GetMap{}          = a==b
+  SomeRequest a@GetCapabilities{} == SomeRequest b@GetCapabilities{} = a==b
+  SomeRequest a@GetFeatureInfo{}  == SomeRequest b@GetFeatureInfo{}  = a==b
+  _                               == _                               = False
+
+data Request (t :: RequestType) where
+  GetCapabilities :: {
       wmsCapFormat         :: Maybe MIME.Type
     , wmsCapVersion        :: Maybe Version
     , wmsCapUpdateSequence :: Maybe UpdateSequence
-    }
-  | MapRequest {
+    } -> Request Capabilities
+  GetMap :: {
       wmsMapVersion      :: Version
     , wmsMapLayers       :: [Layer]
     , wmsMapCrs          :: Crs
@@ -79,8 +102,8 @@ data Request
     , wmsMapTime         :: Maybe Time
     , wmsMapElevation    :: Maybe Scientific
     , wmsMapDimensions   :: [Dimension]
-    }
-  | FeatureInfoRequest {
+    } -> Request Map
+  GetFeatureInfo :: {
       wmsFeatureInfoVersion      :: Version
     , wmsFeatureInfoLayers       :: [Layer]
     , wmsFeatureInfoCrs          :: Crs
@@ -97,54 +120,139 @@ data Request
     , wmsFeatureInfoTime         :: Maybe Time
     , wmsFeatureInfoElevation    :: Maybe Scientific
     , wmsFeatureInfoDimensions   :: [Dimension]
-    }
-  deriving (Eq, Show)
+    } -> Request FeatureInfo
 
-{-
-data Request (t :: RequestType -> *) where
-  = CapabilitiesRequest {
-      wmsCapFormat         :: Maybe MIME.Type
-    , wmsCapVersion        :: Maybe Version
-    , wmsCapUpdateSequence :: Maybe UpdateSequence
-    } -> Request GetCapabilities
-  | MapRequest {
-      wmsMapVersion      :: Version
-    , wmsMapLayers       :: [Layer]
-    , wmsMapCrs          :: Crs
-    , wmsMapBbox         :: Bbox
-    , wmsMapSize         :: Size
-    , wmsMapFormat       :: MIME.Type
-    , wmsMapTransparent  :: Maybe Transparent
-    , wmsMapBackground   :: Maybe BgColor
-    , wmsMapExceptions   :: Maybe Exceptions
-    , wmsMapTime         :: Maybe Time
-    , wmsMapElevation    :: Maybe Scientific
-    , wmsMapDimensions   :: [Dimension]
-    } -> Request GetMap
-  | FeatureInfoRequest {
-      wmsFeatureInfoVersion      :: Version
-    , wmsFeatureInfoLayers       :: [Layer]
-    , wmsFeatureInfoCrs          :: Crs
-    , wmsFeatureInfoBbox         :: Bbox
-    , wmsFeatureInfoSize         :: Size
-    , wmsFeatureInfoFormat       :: MIME.Type
-    , wmsQueryLayers  :: [Name]
-    , wmsInfoFormat   :: MIME.Type
-    , wmsPixel        :: Pixel
-    , wmsFeatureCount :: Maybe Int
-    , wmsFeatureInfoTransparent  :: Maybe Transparent
-    , wmsFeatureInfoBackground   :: Maybe BgColor
-    , wmsFeatureInfoExceptions   :: Maybe Exceptions
-    , wmsFeatureInfoTime         :: Maybe Time
-    , wmsFeatureInfoElevation    :: Maybe Scientific
-    , wmsFeatureInfoDimensions   :: [Dimension]
-    } -> Request GetFeatureInfo
-  deriving (Eq, Show)
-  -}
+deriving instance Show (Request t)
+deriving instance Eq (Request t)
+
+instance Common.Request SomeRequest where
+  parseRequest query@(queryCI -> query') body = do
+    version <- reqVersion query'
+    request <- fromQuery version query'
+    case request of
+      Capabilities -> SomeRequest <$>
+        (parseRequest query body :: Either ParseError (Request Capabilities))
+      Map          -> SomeRequest <$>
+        (parseRequest query body :: Either ParseError (Request Map))
+      FeatureInfo  -> SomeRequest <$>
+        (parseRequest query body :: Either ParseError (Request FeatureInfo))
+
+  renderRequest (SomeRequest r) = renderRequest r
+
+instance Common.Request (Request Capabilities) where
+
+  parseRequest (queryCI -> query) _ = do
+    wmsCapVersion <- reqVersion query
+    wmsCapFormat <- optionalParameter "FORMAT" mimeParser query
+    wmsCapUpdateSequence <- fromQuery_ query
+    return GetCapabilities {..}
+
+  renderRequest GetCapabilities {..} = (query, Nothing)
+    where
+      query = simpleQueryToQuery $ concat [
+          toQueryItems version WMS
+        , toQueryItems version Capabilities
+        , toQueryItems version wmsCapVersion
+        , maybe [] (\fmt -> [("FORMAT", renderMime fmt)]) wmsCapFormat
+        , toQueryItems version wmsCapUpdateSequence
+        ]
+      version = fromMaybe Wms130 wmsCapVersion
+
+instance Common.Request (Request Map) where
+  parseRequest (queryCI -> query) _ = do
+    wmsMapVersion <- maybe (Left (MissingParameterError "VERSION")) return
+                 =<< reqVersion query
+    wmsMapLayers <- fromQuery_ query
+    wmsMapCrs <- fromQuery wmsMapVersion query
+    wmsMapBbox <- fromQuery_ query
+    wmsMapSize <- fromQuery_ query
+    wmsMapFormat <- mandatoryParameter "FORMAT" mimeParser query
+    wmsMapTransparent <- fromQuery_ query
+    wmsMapBackground <- fromQuery_ query
+    wmsMapExceptions <- fromQuery wmsMapVersion query
+    wmsMapTime <- fromQuery_ query
+    wmsMapElevation <- optionalParameter "ELEVATION" scientific query
+    wmsMapDimensions <- fromQuery_ query
+    return GetMap {..}
+
+  renderRequest GetMap {..} = (query, Nothing)
+    where
+      query = simpleQueryToQuery $ concat [
+          toQueryItems wmsMapVersion WMS
+        , toQueryItems wmsMapVersion Map
+        , toQueryItems wmsMapVersion wmsMapVersion
+        , toQueryItems wmsMapVersion wmsMapLayers
+        , toQueryItems wmsMapVersion wmsMapCrs
+        , toQueryItems wmsMapVersion wmsMapBbox
+        , toQueryItems wmsMapVersion wmsMapSize
+        , [("FORMAT", renderMime wmsMapFormat)]
+        , toQueryItems wmsMapVersion wmsMapTransparent
+        , toQueryItems wmsMapVersion wmsMapBackground
+        , toQueryItems wmsMapVersion wmsMapExceptions
+        , toQueryItems wmsMapVersion wmsMapTime
+        , renderOptionalParameter "ELEVATION" (fmap show' wmsMapElevation)
+        , [("FORMAT", renderMime wmsMapFormat)]
+        , toQueryItems wmsMapVersion wmsMapDimensions
+        ]
 
 
-wmsCapabilitiesRequest :: Request
-wmsCapabilitiesRequest = CapabilitiesRequest Nothing Nothing Nothing
+instance Common.Request (Request FeatureInfo) where
+  parseRequest (queryCI -> query) _ = do
+    wmsFeatureInfoVersion <-
+        maybe (Left (MissingParameterError "VERSION")) return
+        =<< reqVersion query
+    wmsFeatureInfoLayers <- fromQuery_ query
+    wmsFeatureInfoCrs <- fromQuery wmsFeatureInfoVersion query
+    wmsFeatureInfoBbox <- fromQuery_ query
+    wmsFeatureInfoSize <- fromQuery_ query
+    wmsFeatureInfoFormat <- mandatoryParameter "FORMAT" mimeParser query
+    wmsFeatureInfoTransparent <- fromQuery_ query
+    wmsFeatureInfoBackground <- fromQuery_ query
+    wmsFeatureInfoExceptions <- fromQuery wmsFeatureInfoVersion query
+    wmsFeatureInfoTime <- fromQuery_ query
+    wmsFeatureInfoElevation <- optionalParameter "ELEVATION" scientific query
+    wmsFeatureInfoDimensions <- fromQuery_ query
+    wmsQueryLayers <- namesFromQuery "QUERY_LAYERS" query
+    wmsFeatureCount <- optionalParameter "FEATURE_COUNT" positiveInt query
+    wmsPixel <- fromQuery_ query
+    wmsInfoFormat <- mandatoryParameter "INFO_FORMAT" mimeParser query
+    return GetFeatureInfo {..}
+
+  renderRequest GetFeatureInfo{..} = (query, Nothing)
+    where
+      query = simpleQueryToQuery $ concat [
+          toQueryItems wmsFeatureInfoVersion WMS
+        , toQueryItems wmsFeatureInfoVersion FeatureInfo
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoVersion
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoLayers
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoCrs
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoBbox
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoSize
+        , [("FORMAT", renderMime wmsFeatureInfoFormat)]
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoTransparent
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoBackground
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoExceptions
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoTime
+        , renderOptionalParameter "ELEVATION" (fmap show' wmsFeatureInfoElevation)
+        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoDimensions
+        , [ ("QUERY_LAYERS", renderNames wmsQueryLayers)
+          , ("INFO_FORMAT", renderMime wmsInfoFormat)
+          ]
+        , renderOptionalParameter "FEATURE_COUNT" (fmap show' wmsFeatureCount)
+        , toQueryItems wmsFeatureInfoVersion wmsPixel
+        ]
+
+reqVersion :: QueryCI -> Either ParseError (Maybe Version)
+reqVersion query =
+  case fromQuery Wms100 query of
+    Right Nothing ->
+      case fromQuery Wms111 query of
+        Left _ -> fromQuery Wms130 query
+        r -> r
+    r -> r
+
+wmsCapabilitiesRequest :: Request Capabilities
+wmsCapabilitiesRequest = GetCapabilities Nothing Nothing Nothing
 
 wmsMapRequest
   :: Version
@@ -153,9 +261,9 @@ wmsMapRequest
   -> Crs
   -> Size
   -> Bbox
-  -> Request
+  -> Request Map
 wmsMapRequest version format layers crs size bbox =
-  MapRequest {
+  GetMap {
     wmsMapVersion      = version
   , wmsMapLayers       = layers
   , wmsMapCrs          = crs
@@ -339,157 +447,31 @@ instance FromQuery RequestType (Maybe Version) where
         Just _      -> wmsRequestParser
         Nothing     -> wmsRequestParser <|> wms100RequestParser
       wms100RequestParser =
-            stringCI "capabilities" *> pure GetCapabilities
-        <|> stringCI "map"          *> pure GetMap
-        <|> stringCI "feature_info" *> pure GetFeatureInfo
+            stringCI "capabilities" *> pure Capabilities
+        <|> stringCI "map"          *> pure Map
+        <|> stringCI "feature_info" *> pure FeatureInfo
       wmsRequestParser =
-            stringCI "GetCapabilities" *> pure GetCapabilities
-        <|> stringCI "GetMap"          *> pure GetMap
-        <|> stringCI "GetFeatureInfo"  *> pure GetFeatureInfo
+            stringCI "GetCapabilities" *> pure Capabilities
+        <|> stringCI "GetMap"          *> pure Map
+        <|> stringCI "GetFeatureInfo"  *> pure FeatureInfo
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems RequestType Version where
-  toQueryItems Wms100 GetCapabilities = [("REQUEST", "capabilities")]
-  toQueryItems Wms100 GetMap          = [("REQUEST", "map")]
-  toQueryItems Wms100 GetFeatureInfo  = [("REQUEST", "feature_info")]
-  toQueryItems _      req             = [("REQUEST", fromString (show req))]
+  toQueryItems Wms100 Capabilities = [("REQUEST", "capabilities")]
+  toQueryItems Wms100 Map          = [("REQUEST", "map")]
+  toQueryItems Wms100 FeatureInfo  = [("REQUEST", "feature_info")]
+  toQueryItems _      Capabilities = [("REQUEST", "GetCapabilities")]
+  toQueryItems _      Map          = [("REQUEST", "GetMap")]
+  toQueryItems _      FeatureInfo  = [("REQUEST", "GetFeatureInfo")]
   {-# INLINE toQueryItems #-}
 
 
-
-instance Common.Request Request where
-  parseRequest (queryCI -> query) _ = do
-    version <- reqVersion
-    request <- fromQuery version query
-    case request of
-      GetCapabilities -> parseCapabilitiesRequest version
-      GetMap          -> parseMapRequest version
-      GetFeatureInfo  -> parseFeatureInfoRequest version
-    where
-      parseCapabilitiesRequest wmsCapVersion = do
-        wmsCapFormat <- optionalParameter "FORMAT" mimeParser query
-        wmsCapUpdateSequence <- fromQuery_ query
-        return CapabilitiesRequest {..}
-
-      parseMapRequest Nothing = Left (MissingParameterError "VERSION")
-      parseMapRequest (Just wmsMapVersion) = do
-        wmsMapLayers <- fromQuery_ query
-        wmsMapCrs <- fromQuery wmsMapVersion query
-        wmsMapBbox <- fromQuery_ query
-        wmsMapSize <- fromQuery_ query
-        wmsMapFormat <- mandatoryParameter "FORMAT" mimeParser query
-        wmsMapTransparent <- fromQuery_ query
-        wmsMapBackground <- fromQuery_ query
-        wmsMapExceptions <- fromQuery wmsMapVersion query
-        wmsMapTime <- fromQuery_ query
-        wmsMapElevation <- optionalParameter "ELEVATION" scientific query
-        wmsMapDimensions <- fromQuery_ query
-        return MapRequest {..}
-
-      parseFeatureInfoRequest Nothing = Left (MissingParameterError "VERSION")
-      parseFeatureInfoRequest (Just wmsFeatureInfoVersion) = do
-        wmsFeatureInfoLayers <- fromQuery_ query
-        wmsFeatureInfoCrs <- fromQuery wmsFeatureInfoVersion query
-        wmsFeatureInfoBbox <- fromQuery_ query
-        wmsFeatureInfoSize <- fromQuery_ query
-        wmsFeatureInfoFormat <- mandatoryParameter "FORMAT" mimeParser query
-        wmsFeatureInfoTransparent <- fromQuery_ query
-        wmsFeatureInfoBackground <- fromQuery_ query
-        wmsFeatureInfoExceptions <- fromQuery wmsFeatureInfoVersion query
-        wmsFeatureInfoTime <- fromQuery_ query
-        wmsFeatureInfoElevation <- optionalParameter "ELEVATION" scientific query
-        wmsFeatureInfoDimensions <- fromQuery_ query
-        wmsQueryLayers <- namesFromQuery "QUERY_LAYERS" query
-        wmsFeatureCount <- optionalParameter "FEATURE_COUNT" positiveInt query
-        wmsPixel <- fromQuery_ query
-        wmsInfoFormat <- mandatoryParameter "INFO_FORMAT" mimeParser query
-        return FeatureInfoRequest {..}
-
-      reqVersion =
-        case fromQuery Wms100 query of
-          Right Nothing ->
-            case fromQuery Wms111 query of
-              Left _ -> fromQuery Wms130 query
-              r -> r
-          r -> r
-
-  renderRequest CapabilitiesRequest {..} = (query, Nothing)
-    where
-      query = simpleQueryToQuery $ concat [
-          toQueryItems version WMS
-        , toQueryItems version GetCapabilities
-        , toQueryItems version wmsCapVersion
-        , maybe [] (\fmt -> [("FORMAT", renderMime fmt)]) wmsCapFormat
-        , toQueryItems version wmsCapUpdateSequence
-        ]
-      version = fromMaybe Wms130 wmsCapVersion
-  renderRequest MapRequest {..} = (query, Nothing)
-    where
-      query = simpleQueryToQuery $ concat [
-          toQueryItems wmsMapVersion WMS
-        , toQueryItems wmsMapVersion GetMap
-        , toQueryItems wmsMapVersion wmsMapVersion
-        , toQueryItems wmsMapVersion wmsMapLayers
-        , toQueryItems wmsMapVersion wmsMapCrs
-        , toQueryItems wmsMapVersion wmsMapBbox
-        , toQueryItems wmsMapVersion wmsMapSize
-        , [("FORMAT", renderMime wmsMapFormat)]
-        , toQueryItems wmsMapVersion wmsMapTransparent
-        , toQueryItems wmsMapVersion wmsMapBackground
-        , toQueryItems wmsMapVersion wmsMapExceptions
-        , toQueryItems wmsMapVersion wmsMapTime
-        , renderOptionalParameter "ELEVATION" (fmap show' wmsMapElevation)
-        , [("FORMAT", renderMime wmsMapFormat)]
-        , toQueryItems wmsMapVersion wmsMapDimensions
-        ]
-  renderRequest FeatureInfoRequest {..} = (query, Nothing)
-    where
-      query = simpleQueryToQuery $ concat [
-          toQueryItems wmsFeatureInfoVersion WMS
-        , toQueryItems wmsFeatureInfoVersion GetFeatureInfo
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoVersion
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoLayers
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoCrs
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoBbox
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoSize
-        , [("FORMAT", renderMime wmsFeatureInfoFormat)]
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoTransparent
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoBackground
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoExceptions
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoTime
-        , renderOptionalParameter "ELEVATION" (fmap show' wmsFeatureInfoElevation)
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoDimensions
-        , [ ("QUERY_LAYERS", renderNames wmsQueryLayers)
-          , ("INFO_FORMAT", renderMime wmsInfoFormat)
-          ]
-        , renderOptionalParameter "FEATURE_COUNT" (fmap show' wmsFeatureCount)
-        , toQueryItems wmsFeatureInfoVersion wmsPixel
-        ]
-
 instance FromQuery Crs Version where
-  fromQuery Wms130 = reqCrs "CRS"
-  fromQuery _      = reqCrs "SRS"
+  fromQuery Wms130 = mandatoryParameter "CRS" crsParser
+  fromQuery _      = mandatoryParameter "SRS" crsParser
   {-# INLINE fromQuery #-}
 
 instance ToQueryItems Crs Version where
-  toQueryItems Wms130 (Coded code val) =
-    [("CRS", runBuilder (fromString code <> ":" <> show' val))]
-  toQueryItems _ (Coded code val) =
-    [("SRS", runBuilder (fromString code <> ":" <> show' val))]
-  toQueryItems Wms130 (Named name) = [("CRS", fromString name)]
-  toQueryItems _      (Named name) = [("SRS", fromString name)]
-  toQueryItems _      _            = [] -- let the remote server decide
+  toQueryItems Wms130 crs = [("CRS", renderCrs crs)]
+  toQueryItems _      crs = [("SRS", renderCrs crs)]
   {-# INLINE toQueryItems #-}
-
-reqCrs :: CI ByteString -> QueryCI -> Either ParseError Crs
-reqCrs key =
-  mandatoryParameter key $ coded "EPSG"
-                       <|> coded "CRS"
-                       <|> coded "SR-ORG"
-                       <|> named
-  where
-    named = namedCrs <$> (BS.unpack <$> takeByteString)
-    coded code = maybe (fail "invalid coded crs") return =<< mCoded code
-    mCoded code =
-      codedCrs <$> (BS.unpack <$> stringCI code <* char ':')
-               <*> decimal <* endOfInput

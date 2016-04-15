@@ -42,9 +42,6 @@ test-suite spec
                      , bytestring
                      , hspec
                      , hspec-core >= 1.13
-                     , hspec-wai
-                     , wai
-                     , wai-extra
                      , http-types
                      , wai-ogc
                      , QuickCheck
