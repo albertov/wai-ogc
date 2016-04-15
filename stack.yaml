@@ -3,7 +3,7 @@ packages:
 - '.'
 - location:
     git: https://github.com/albertov/spatial-reference.git
-    commit: de83fe1319e14937c71e82baeca3f5f3411d1a49
+    commit: f4deaea7abe752105275abfc61338e0d9cfe7522
   extra-dep: true
 extra-deps:
 - mime-0.4.0.2
