@@ -30,6 +30,7 @@ module Network.Wai.Ogc.Wms (
   -- * 'Request' constructors
   , wmsCapabilitiesRequest
   , wmsMapRequest
+  , wmsFeatureInfoRequest
 
   -- * Smart constructors
   , mkLayer
@@ -104,26 +105,58 @@ data Request (t :: RequestType) where
     , wmsMapDimensions   :: [Dimension]
     } -> Request Map
   GetFeatureInfo :: {
-      wmsFeatureInfoVersion      :: Version
-    , wmsFeatureInfoLayers       :: [Layer]
-    , wmsFeatureInfoCrs          :: Crs
-    , wmsFeatureInfoBbox         :: Bbox
-    , wmsFeatureInfoSize         :: Size
-    , wmsFeatureInfoFormat       :: MIME.Type
-    , wmsQueryLayers  :: [Name]
-    , wmsInfoFormat   :: MIME.Type
-    , wmsPixel        :: Pixel
-    , wmsFeatureCount :: Maybe Int
-    , wmsFeatureInfoTransparent  :: Maybe Transparent
-    , wmsFeatureInfoBackground   :: Maybe BgColor
-    , wmsFeatureInfoExceptions   :: Maybe Exceptions
-    , wmsFeatureInfoTime         :: Maybe Time
-    , wmsFeatureInfoElevation    :: Maybe Scientific
-    , wmsFeatureInfoDimensions   :: [Dimension]
+      wmsInfoMapRequest :: Request Map
+    , wmsQueryLayers    :: [Name]
+    , wmsInfoFormat     :: MIME.Type
+    , wmsPixel          :: Pixel
+    , wmsFeatureCount   :: Maybe Int
     } -> Request FeatureInfo
 
 deriving instance Show (Request t)
 deriving instance Eq (Request t)
+
+
+wmsCapabilitiesRequest :: Request Capabilities
+wmsCapabilitiesRequest = GetCapabilities Nothing Nothing Nothing
+
+wmsMapRequest
+  :: Version
+  -> MIME.Type
+  -> [Layer]
+  -> Crs
+  -> Size
+  -> Bbox
+  -> Request Map
+wmsMapRequest version format layers crs size bbox =
+  GetMap {
+    wmsMapVersion      = version
+  , wmsMapLayers       = layers
+  , wmsMapCrs          = crs
+  , wmsMapBbox         = bbox
+  , wmsMapSize         = size
+  , wmsMapFormat       = format
+  , wmsMapTransparent  = Nothing
+  , wmsMapBackground   = Nothing
+  , wmsMapExceptions   = Nothing
+  , wmsMapTime         = Nothing
+  , wmsMapElevation    = Nothing
+  , wmsMapDimensions   = []
+  }
+
+wmsFeatureInfoRequest
+  :: Request Map
+  -> MIME.Type
+  -> [Name]
+  -> Pixel
+  -> Request FeatureInfo
+wmsFeatureInfoRequest mapRequest format infoLayers pixel =
+  GetFeatureInfo {
+      wmsInfoMapRequest = mapRequest
+    , wmsQueryLayers    = infoLayers
+    , wmsInfoFormat     = format
+    , wmsPixel          = pixel
+    , wmsFeatureCount   = Nothing
+    }
 
 instance Common.Request SomeRequest where
   parseRequest query@(queryCI -> query') body = do
@@ -191,56 +224,31 @@ instance Common.Request (Request Map) where
         , toQueryItems wmsMapVersion wmsMapExceptions
         , toQueryItems wmsMapVersion wmsMapTime
         , renderOptionalParameter "ELEVATION" (fmap show' wmsMapElevation)
-        , [("FORMAT", renderMime wmsMapFormat)]
         , toQueryItems wmsMapVersion wmsMapDimensions
         ]
 
 
 instance Common.Request (Request FeatureInfo) where
-  parseRequest (queryCI -> query) _ = do
-    wmsFeatureInfoVersion <-
-        maybe (Left (MissingParameterError "VERSION")) return
-        =<< reqVersion query
-    wmsFeatureInfoLayers <- fromQuery_ query
-    wmsFeatureInfoCrs <- fromQuery wmsFeatureInfoVersion query
-    wmsFeatureInfoBbox <- fromQuery_ query
-    wmsFeatureInfoSize <- fromQuery_ query
-    wmsFeatureInfoFormat <- mandatoryParameter "FORMAT" mimeParser query
-    wmsFeatureInfoTransparent <- fromQuery_ query
-    wmsFeatureInfoBackground <- fromQuery_ query
-    wmsFeatureInfoExceptions <- fromQuery wmsFeatureInfoVersion query
-    wmsFeatureInfoTime <- fromQuery_ query
-    wmsFeatureInfoElevation <- optionalParameter "ELEVATION" scientific query
-    wmsFeatureInfoDimensions <- fromQuery_ query
+  parseRequest oQuery@(queryCI -> query) body = do
+    wmsInfoMapRequest <- parseRequest oQuery body
     wmsQueryLayers <- namesFromQuery "QUERY_LAYERS" query
     wmsFeatureCount <- optionalParameter "FEATURE_COUNT" positiveInt query
     wmsPixel <- fromQuery_ query
     wmsInfoFormat <- mandatoryParameter "INFO_FORMAT" mimeParser query
     return GetFeatureInfo {..}
 
-  renderRequest GetFeatureInfo{..} = (query, Nothing)
+  renderRequest GetFeatureInfo{..} = (query, mapBody)
     where
-      query = simpleQueryToQuery $ concat [
-          toQueryItems wmsFeatureInfoVersion WMS
-        , toQueryItems wmsFeatureInfoVersion FeatureInfo
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoVersion
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoLayers
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoCrs
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoBbox
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoSize
-        , [("FORMAT", renderMime wmsFeatureInfoFormat)]
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoTransparent
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoBackground
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoExceptions
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoTime
-        , renderOptionalParameter "ELEVATION" (fmap show' wmsFeatureInfoElevation)
-        , toQueryItems wmsFeatureInfoVersion wmsFeatureInfoDimensions
+      (mapQuery, mapBody) = renderRequest wmsInfoMapRequest
+      query = filter ((/="REQUEST") . fst) mapQuery ++
+        simpleQueryToQuery (concat [
+          toQueryItems (wmsMapVersion wmsInfoMapRequest) FeatureInfo
         , [ ("QUERY_LAYERS", renderNames wmsQueryLayers)
           , ("INFO_FORMAT", renderMime wmsInfoFormat)
           ]
         , renderOptionalParameter "FEATURE_COUNT" (fmap show' wmsFeatureCount)
-        , toQueryItems wmsFeatureInfoVersion wmsPixel
-        ]
+        , toQueryItems () wmsPixel
+        ])
 
 reqVersion :: QueryCI -> Either ParseError (Maybe Version)
 reqVersion query =
@@ -251,32 +259,6 @@ reqVersion query =
         r -> r
     r -> r
 
-wmsCapabilitiesRequest :: Request Capabilities
-wmsCapabilitiesRequest = GetCapabilities Nothing Nothing Nothing
-
-wmsMapRequest
-  :: Version
-  -> MIME.Type
-  -> [Layer]
-  -> Crs
-  -> Size
-  -> Bbox
-  -> Request Map
-wmsMapRequest version format layers crs size bbox =
-  GetMap {
-    wmsMapVersion      = version
-  , wmsMapLayers       = layers
-  , wmsMapCrs          = crs
-  , wmsMapBbox         = bbox
-  , wmsMapSize         = size
-  , wmsMapFormat       = format
-  , wmsMapTransparent  = Nothing
-  , wmsMapBackground   = Nothing
-  , wmsMapExceptions   = Nothing
-  , wmsMapTime         = Nothing
-  , wmsMapElevation    = Nothing
-  , wmsMapDimensions   = []
-  }
 
 
 --

@@ -13,6 +13,7 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
 import           Data.Time (UTCTime(..))
 import           Data.Time.Calendar (fromGregorian)
+import qualified Data.List as L
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
 import           Data.String (fromString)
@@ -38,6 +39,11 @@ spec = do
     property  $ \(req :: SomeRequest) ->
       uncurry parseRequest (renderRequest req) == Right req
 
+  it "does not duplicate arguments" $
+    property  $ \(req :: SomeRequest) ->
+      let (query, _) = renderRequest req
+          args = filter ((/="DIM_") . BS.take 4) (map fst query)
+      in counterexample (show args) (length args == length (L.nub args))
 
 {-
 commonSpec :: Spec
@@ -223,11 +229,8 @@ instance Arbitrary (Request Map) where
 
 instance Arbitrary (Request FeatureInfo) where
   arbitrary = GetFeatureInfo
-    <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
-    <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+    <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
     <*> (fmap getPositive <$> arbitrary)
-    <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
-    <*> arbitrary
 
 instance Arbitrary Type where
   arbitrary = Type <$> arbitrary <*> pure []
