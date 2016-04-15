@@ -233,21 +233,22 @@ instance Common.Request (Request FeatureInfo) where
     wmsInfoMapRequest <- parseRequest oQuery body
     wmsQueryLayers <- namesFromQuery "QUERY_LAYERS" query
     wmsFeatureCount <- optionalParameter "FEATURE_COUNT" positiveInt query
-    wmsPixel <- fromQuery_ query
+    wmsPixel <- fromQuery (wmsMapVersion wmsInfoMapRequest) query
     wmsInfoFormat <- mandatoryParameter "INFO_FORMAT" mimeParser query
     return GetFeatureInfo {..}
 
   renderRequest GetFeatureInfo{..} = (query, mapBody)
     where
       (mapQuery, mapBody) = renderRequest wmsInfoMapRequest
+      version = wmsMapVersion wmsInfoMapRequest
       query = filter ((/="REQUEST") . fst) mapQuery ++
         simpleQueryToQuery (concat [
-          toQueryItems (wmsMapVersion wmsInfoMapRequest) FeatureInfo
+          toQueryItems version FeatureInfo
         , [ ("QUERY_LAYERS", renderNames wmsQueryLayers)
           , ("INFO_FORMAT", renderMime wmsInfoFormat)
           ]
         , renderOptionalParameter "FEATURE_COUNT" (fmap show' wmsFeatureCount)
-        , toQueryItems () wmsPixel
+        , toQueryItems version wmsPixel
         ])
 
 reqVersion :: QueryCI -> Either ParseError (Maybe Version)
@@ -347,15 +348,23 @@ data Pixel =
   , pixelCol :: !Int
   } deriving (Eq, Show)
 
-instance FromQuery Pixel () where
-  fromQuery () query =
-    Pixel <$> mandatoryParameter "I" (signed decimal) query
-          <*> mandatoryParameter "J" (signed decimal) query
+instance FromQuery Pixel Version where
+  fromQuery version query =
+    Pixel <$> mandatoryParameter iName (signed decimal) query
+          <*> mandatoryParameter jName (signed decimal) query
+    where
+      iName = case version of {Wms130 -> "I"; _ -> "X"}
+      jName = case version of {Wms130 -> "J"; _ -> "Y"}
   {-# INLINE fromQuery #-}
 
-instance ToQueryItems Pixel c where
-  toQueryItems _ (Pixel i j) =
-    [("I", fromString (show i)) , ("J", fromString (show j))]
+instance ToQueryItems Pixel Version where
+  toQueryItems version (Pixel i j) =
+    [ (iName, fromString (show i))
+    , (jName, fromString (show j))
+    ]
+    where
+      iName = case version of {Wms130 -> "I"; _ -> "X"}
+      jName = case version of {Wms130 -> "J"; _ -> "Y"}
   {-# INLINE toQueryItems #-}
 
 
