@@ -74,8 +74,6 @@ module Network.Wai.Ogc.Common (
   , module Duration
 ) where
 
-import           Network.Wai.Ogc.Internal.Duration as Duration
-
 import           Control.Applicative ((<|>), optional)
 import           Control.Arrow (first)
 import           Control.Monad (liftM)
@@ -102,6 +100,7 @@ import qualified Data.Text.Encoding.Error as T
 import           Data.Time (UTCTime(..), defaultTimeLocale)
 import           Data.Time.Calendar (fromGregorian)
 import           Data.Time.Format (formatTime)
+import           Data.Time.ISO8601.Duration as Duration
 import           Data.Typeable (Typeable)
 import           SpatialReference as SR
 import           Network.HTTP.Types.URI (Query)

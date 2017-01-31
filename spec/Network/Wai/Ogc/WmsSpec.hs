@@ -249,10 +249,10 @@ instance Arbitrary MIMEType where
     -- FIXME: parseMIMEType does funky things with encoding
     ]
 
-instance Arbitrary [Name] where
+instance {-# OVERLAPS #-} Arbitrary [Name] where
   arbitrary = listOf1 arbitrary
 
-instance Arbitrary [Layer] where
+instance {-# OVERLAPS #-}  Arbitrary [Layer] where
   arbitrary = listOf1 arbitrary
 
 instance Arbitrary Layer where

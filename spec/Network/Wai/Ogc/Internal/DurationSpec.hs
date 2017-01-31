@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Network.Wai.Ogc.Internal.DurationSpec (main, spec) where
 
-import           Network.Wai.Ogc.Internal.Duration
+import           Data.Time.ISO8601.Duration
 import qualified Data.ByteString.Char8 as BS8
 import           Test.Hspec
 import           Test.Hspec.QuickCheck (prop)
